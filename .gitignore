@@ -3,3 +3,19 @@
 *.aif
 *.aiff
 *.br
+
+# Python venvs
+.venv/
+venv./
+venv/
+__pycache__/
+*.pyc
+
+# Jobs/temp
+jobs/
+
+# Junk
+Untitled Document
+
+# Node
+node_modules/

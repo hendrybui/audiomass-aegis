@@ -1,32 +1,69 @@
-# AudioMass
-Free full-featured web-based audio &amp; waveform editing tool
+# AudioMass — AEGIS Fork
 
+Forked from [pkalogiros/AudioMass](https://github.com/pkalogiros/AudioMass) (MIT License).
 
-Live: [https://audiomass.co](https://audiomass.co)
+A web-based multitrack audio editor with significant enhancements for music production workflows.
 
----
+## What's New in This Fork
 
-### Now with multitrack support!
+### Multitrack Enhancements
 
-AudioMass now ships with a full multitrack mode -- layer multiple tracks, drag clips around, crossfade overlaps, record onto armed channels, and bounce the whole thing back down to a single file. More details on the [about page](https://audiomass.co/about.html).
+- **Marker System** — Press `M` to drop a marker at the cursor. MK panel for list, rename, goto, delete. Yellow overlays on ruler.
+- **Loop Table** — Save regions as loops. Quick-loop buttons for 4/8/16 bars. Play, rename, delete.
+- **Slice to Sampler** — Right-click any clip → slice into 4/8/16/beat/bar pieces. Each slice becomes an individual clip.
+- **Eraser Mode** — Toggle eraser, click any clip to delete. Full undo support.
+- **Silence Clip** — Right-click → zero out audio buffer while keeping the clip in the timeline.
+- **Multi-Clip Selection & Group Drag** — Shift+click to select multiple clips, drag them together with snap awareness.
+- **BPM Auto-Detect** — Tempo estimator auto-sets the beat grid BPM when confidence > 15%.
+- **Brighter Beat Grid** — Sub-beat lines 3x more visible (28% cyan), bar lines 2.5x (55% yellow).
 
-![AudioMass Multitrack](https://audiomass.co/about/multitrack.png)
+### Project Save/Load
 
----
+- Full project persistence via FastAPI backend
+- Audio buffers encoded as WAV and uploaded to server
+- Project list modal with load and delete
+- Clip-by-clip audio restoration on load
 
-## Getting it to Run!
-1. please checkout this repo (or download it as zip)
-2. navigate to it through your favorite CLI, then access the ```src``` dir
-3. Run ```go run audiomass-server.go```  -  or if you do not have golang installed, you can use a simple python webserver by running ```python audiomass-server.py```
-4. Navigate to [http://localhost:5055/](http://localhost:5055/) and have fun!
+### Export
 
-...
+- **Download All Stems** — One-click export of all tracks as separate WAV files
+- In-browser WAV encoder (no external library needed)
 
+### New Modules
 
+- `stems.js` — AI stem separation integration
+- `embed.js` — Embedding support
 
----
+## Original Features (from upstream)
 
-If you want to build the all.build.js minified file for delivery/publishing this then you can use uglify and run as:
-```cat dist/wavesurfer.js dist/plugin/wavesurfer.regions.js oneup.js app.js keys.js contextmenu.js lufs.js ui-fx.js ui.js modal.js state.js engine.js actions.js drag.js recorder.js multitrack.js welcome.js fx-pg-eq.js fx-auto.js local.js id3.js lzma.js | uglifyjs -c -m -o all.build.js```
+- Full waveform editor with cut, copy, paste, fade, normalize
+- Multitrack mode with drag, crossfade, recording
+- Effects: compressor, reverb, normalize, paragraphic EQ
+- Tempo estimation with autocorrelation BPM detection
+- MP3/WAV/FLAC export
+- .amss session format
+- Mobile touch support
 
-Thanks!
+## Tech Stack
+
+- **Frontend:** Vanilla JavaScript, CSS, HTML (no frameworks)
+- **Backend:** Python FastAPI (uvicorn)
+- **No build step** — edit `src/*.js` and reload
+
+## Running
+
+```bash
+cd audiomass
+AUDIOMASS_PORT=5055 .venv/bin/uvicorn app:app --host 0.0.0.0 --port 5055 --app-dir backend
+```
+
+Then open `http://localhost:5055/?multitrack=1` in your browser.
+
+## Credits
+
+- **Original author:** [Pantelis Kalogiros (pkalogiros)](https://github.com/pkalogiros)
+- **Fork enhancements:** Henry Bui ([hendrybui](https://github.com/hendrybui)) — built with AEGIS
+
+## License
+
+MIT — see [LICENSE](LICENSE)

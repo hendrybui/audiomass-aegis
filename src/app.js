@@ -130,6 +130,7 @@
 			q.fls    = new q._deps.fls ( q );
 			q.amss   = q._deps.amss ? new q._deps.amss ( q ) : null;
 			q.multitrack = q._deps.multitrack ? new q._deps.multitrack ( q ) : null;
+			q.stems = q._deps.stems ? new q._deps.stems ( q ) : null;
 
 			if (q.multitrack && /[?&]multitrack=1\b/.test(w.location.search)) {
 				q.multitrack.Toggle (true);
@@ -154,6 +155,208 @@
 		// check if we are mobile and hide tooltips on hover
 		q.isMobile = (/iphone|ipod|ipad|android/).test
 			(navigator.userAgent.toLowerCase ());
+
+		// --- Project Save/Load ---
+		q._getApiBase = function () {
+			return w.location.origin + '/api';
+		};
+
+		q._audioBufferToWavBlob = function ( buffer ) {
+			var numCh = buffer.numberOfChannels;
+			var sr = buffer.sampleRate;
+			var len = buffer.length;
+			var chData = [];
+			for (var c = 0; c < numCh; c++) chData.push (buffer.getChannelData (c));
+			var interleaved = new Float32Array (len * numCh);
+			for (var i = 0; i < len; i++)
+				for (var ch = 0; ch < numCh; ch++)
+					interleaved[i * numCh + ch] = chData[ch][i];
+			var dataLen = interleaved.length * 2;
+			var ab = new ArrayBuffer (44 + dataLen);
+			var v = new DataView (ab);
+			var ws = function (o, str) { for (var k = 0; k < str.length; k++) v.setUint8 (o + k, str.charCodeAt (k)); };
+			ws (0, 'RIFF'); v.setUint32 (4, 36 + dataLen, true); ws (8, 'WAVE');
+			ws (12, 'fmt '); v.setUint32 (16, 16, true); v.setUint16 (20, 1, true);
+			v.setUint16 (22, numCh, true); v.setUint32 (24, sr, true);
+			v.setUint32 (28, sr * numCh * 2, true); v.setUint16 (32, numCh * 2, true);
+			v.setUint16 (34, 16, true); ws (36, 'data'); v.setUint32 (40, dataLen, true);
+			for (var p = 0; p < interleaved.length; p++) {
+				var s = Math.max (-1, Math.min (1, interleaved[p]));
+				v.setInt16 (44 + p * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+			}
+			return new Blob ([v], {type: 'audio/wav'});
+		};
+
+		q._saveProject = function ( name, mt ) {
+			if (!mt || !mt.GetState) return;
+			var state = mt.GetState ();
+			if (!state || !state.clips || !state.clips.length) {
+				alert ('Nothing to save — no tracks found.');
+				return;
+			}
+
+			// build form data
+			var fd = new FormData ();
+			fd.append ('name', name);
+			// serialize state without buffer objects
+			var stateCopy = JSON.parse (JSON.stringify (state));
+			// buffer is an AudioBuffer — can't serialize, replace with clip id reference
+			for (var i = 0; i < stateCopy.clips.length; i++) {
+				delete stateCopy.clips[i].buffer;
+			}
+			fd.append ('state', JSON.stringify (stateCopy));
+
+			// attach clip buffers as WAV files
+			var clips = state.clips;
+			for (var j = 0; j < clips.length; j++) {
+				if (clips[j].buffer) {
+					var blob = q._audioBufferToWavBlob (clips[j].buffer);
+					fd.append ('clips', blob, clips[j].id + '.wav');
+				}
+			}
+
+			// send to backend
+			fetch (q._getApiBase () + '/projects', {
+				method: 'POST',
+				body: fd
+			}).then (function (r) {
+				if (!r.ok) throw new Error ('Save failed: ' + r.status);
+				return r.json ();
+			}).then (function (data) {
+				// show success toast
+				var existing = d.querySelector ('.pk_toast_save');
+				if (existing) existing.remove ();
+				var toast = d.createElement ('div');
+				toast.className = 'pk_toast_save';
+				toast.style.cssText = 'position:fixed;bottom:60px;left:50%;transform:translateX(-50%);background:#2d2d2d;color:#fff;padding:10px 20px;border-radius:6px;z-index:99999;font-size:13px;';
+				toast.textContent = 'Project saved: ' + (data.name || name);
+				d.body.appendChild (toast);
+				setTimeout (function () { toast.remove (); }, 3000);
+			}).catch (function (err) {
+				alert ('Save failed: ' + err.message);
+			});
+		};
+
+		q._loadProjectList = function () {
+			fetch (q._getApiBase () + '/projects').then (function (r) {
+				if (!r.ok) throw new Error ('Failed to load projects');
+				return r.json ();
+			}).then (function (projects) {
+				if (!projects.length) {
+					alert ('No saved projects found.');
+					return;
+				}
+				// show project picker modal
+				var body = '<div style="padding:8px;max-height:300px;overflow-y:auto">';
+				for (var i = 0; i < projects.length; i++) {
+					var p = projects[i];
+					body += '<div class="pk_proj_item" data-id="' + p.project_id + '" style="padding:8px;margin:4px 0;background:#333;border-radius:4px;cursor:pointer;display:flex;justify-content:space-between;align-items:center">';
+					body += '<div><strong style="color:#eee">' + (p.name || 'Untitled') + '</strong><br/><span style="color:#999;font-size:11px">' + p.track_count + ' tracks, ' + p.clip_count + ' clips — ' + new Date(p.created_at).toLocaleString() + '</span></div>';
+					body += '<button class="pk_proj_del" data-id="' + p.project_id + '" style="background:#c0392b;color:#fff;border:none;padding:4px 8px;border-radius:3px;cursor:pointer;font-size:11px">Delete</button>';
+					body += '</div>';
+				}
+				body += '</div>';
+
+				var _app = q;
+				new PKSimpleModal({
+					title: 'Load Project',
+					ondestroy: function () {
+						_app.ui.InteractionHandler.on = false;
+						_app.ui.KeyHandler.removeCallback ('modalTemp');
+					},
+					buttons: [],
+					body: body,
+					setup: function ( modal ) {
+						// click to load
+						modal.el_body.addEventListener ('click', function (ev) {
+							var del = ev.target.closest ('.pk_proj_del');
+							if (del) {
+								ev.stopPropagation ();
+								var pid = del.getAttribute ('data-id');
+								if (confirm ('Delete this project?')) {
+									fetch (_app._getApiBase () + '/projects/' + pid, { method: 'DELETE' });
+									del.closest ('.pk_proj_item').remove ();
+								}
+								return;
+							}
+							var item = ev.target.closest ('.pk_proj_item');
+							if (item) {
+								var pid = item.getAttribute ('data-id');
+								modal.Destroy ();
+								_app._loadProject (pid);
+							}
+						});
+					}
+				}).Show ();
+			}).catch (function (err) {
+				alert ('Failed to load project list: ' + err.message);
+			});
+		};
+
+		q._loadProject = function ( projectId ) {
+			fetch (q._getApiBase () + '/projects/' + projectId).then (function (r) {
+				if (!r.ok) throw new Error ('Project not found');
+				return r.json ();
+			}).then (function (data) {
+				var state = data.state;
+				var clipIds = data.clips || [];
+
+				if (!clipIds.length) {
+					alert ('Project has no audio clips.');
+					return;
+				}
+
+				// show loading toast
+				var toast = d.createElement ('div');
+				toast.className = 'pk_toast_save';
+				toast.style.cssText = 'position:fixed;bottom:60px;left:50%;transform:translateX(-50%);background:#2d2d2d;color:#fff;padding:10px 20px;border-radius:6px;z-index:99999;font-size:13px;';
+				toast.textContent = 'Loading project...';
+				d.body.appendChild (toast);
+
+				// load each clip's audio buffer
+				var loaded = 0;
+				var total = clipIds.length;
+				var clipBuffers = {};
+				var actx = new (w.AudioContext || w.webkitAudioContext) ();
+
+				for (var i = 0; i < clipIds.length; i++) {
+					(function (cid) {
+						var url = q._getApiBase () + '/projects/' + projectId + '/clips/' + cid;
+						fetch (url).then (function (r) {
+							return r.arrayBuffer ();
+						}).then (function (ab) {
+							return actx.decodeAudioData (ab);
+						}).then (function (buffer) {
+							clipBuffers[cid] = buffer;
+							loaded++;
+							toast.textContent = 'Loading clips... ' + loaded + '/' + total;
+							if (loaded === total) {
+								// all clips loaded — restore state
+								for (var c = 0; c < state.clips.length; c++) {
+									state.clips[c].buffer = clipBuffers[state.clips[c].id] || null;
+								}
+								// make sure multitrack is active
+								if (!q.multitrack || !q.multitrack.Toggle) return;
+								q.multitrack.Toggle (true);
+								// restore state
+								if (q.multitrack.RestoreProjectState) {
+									q.multitrack.RestoreProjectState (state);
+								}
+								if (actx.close) actx.close ();
+								toast.textContent = 'Project loaded!';
+								setTimeout (function () { toast.remove (); }, 2000);
+							}
+						}).catch (function (err) {
+							console.error ('Failed to load clip ' + cid + ':', err);
+							loaded++;
+							if (loaded === total && toast.parentNode) toast.remove ();
+						});
+					})(clipIds[i]);
+				}
+			}).catch (function (err) {
+				alert ('Failed to load project: ' + err.message);
+			});
+		};
 	};
 
 	!w.PKAudioList && (w.PKAudioList = []);

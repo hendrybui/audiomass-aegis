@@ -1670,3 +1670,44 @@ input,textarea{-webkit-touch-callout:none}
 
 	.pk_mt_side{flex:0 0 132px;width:132px}
 }
+
+
+/* ── Markers, Loops, Slicer Extras ── */
+.pk_mt_extras_tab{display:inline-flex;gap:2px;margin-left:8px;border-left:1px solid rgba(255,255,255,.15);padding-left:8px}
+.pk_mt_ext_btn{font-size:10px!important;padding:2px 6px!important;min-width:24px!important}
+.pk_mt_ext_btn.pk_act{background:#5af2ff30!important;color:#5af2ff!important}
+
+.pk_mt_extras_panel{position:relative;background:#1a1a2e;border:1px solid #2a2a4a;border-radius:6px;margin:4px 8px;padding:8px;max-height:180px;overflow-y:auto;font-size:12px;color:#ccc}
+
+.pk_ext_header{font-weight:700;color:#5af2ff;font-size:11px;text-transform:uppercase;margin-bottom:6px;display:flex;align-items:center;gap:8px}
+.pk_ext_header a{color:#f0d878;cursor:pointer;font-weight:400;font-size:11px}
+.pk_ext_header a:hover{text-decoration:underline}
+
+.pk_ext_empty{color:#666;font-size:11px;font-style:italic;padding:4px 0}
+
+.pk_ext_list{display:flex;flex-direction:column;gap:2px}
+.pk_ext_item{display:flex;align-items:center;gap:4px;padding:3px 4px;border-radius:3px;background:rgba(255,255,255,.04)}
+.pk_ext_item:hover{background:rgba(255,255,255,.08)}
+
+.pk_ext_goto,.pk_ext_play_loop{cursor:pointer;color:#5af2ff;font-size:11px;flex-shrink:0;width:18px;text-align:center}
+.pk_ext_goto:hover,.pk_ext_play_loop:hover{color:#fff}
+.pk_ext_name,.pk_ext_lname{background:transparent;border:1px solid transparent;color:#ccc;font-size:11px;width:80px;padding:1px 3px;border-radius:2px}
+.pk_ext_name:focus,.pk_ext_lname:focus{border-color:#5af2ff;outline:none;background:rgba(90,242,255,.08)}
+.pk_ext_time,.pk_ext_range{color:#888;font-size:10px;flex-shrink:0;white-space:nowrap}
+.pk_ext_del{cursor:pointer;color:#555;font-size:11px;margin-left:auto;flex-shrink:0;width:16px;text-align:center}
+.pk_ext_del:hover{color:#ff5555}
+
+.pk_ext_quick{display:flex;gap:4px;margin-bottom:6px}
+.pk_ext_qloop,.pk_ext_slice{background:#2a2a4a;color:#ccc;padding:3px 10px;border-radius:3px;cursor:pointer;font-size:11px;text-align:center}
+.pk_ext_qloop:hover,.pk_ext_slice:hover{background:#3a3a5a;color:#fff}
+
+.pk_ext_save_loop{font-size:11px!important}
+
+/* Marker overlays on ruler */
+.pk_mt_mk_ov{position:absolute;top:0;cursor:pointer;z-index:5;display:flex;flex-direction:column;align-items:center;transform:translateX(-50%)}
+.pk_mt_mk_tri{color:#f0d878;font-size:9px;line-height:1}
+.pk_mt_mk_lbl{color:#f0d878;font-size:8px;background:rgba(240,216,120,.15);padding:0 2px;border-radius:2px;max-width:50px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+
+.pk_mt_ext_btn.pk_act.pk_mt_ext_btn { background: #ff555540 !important; color: #ff5555 !important; }
+

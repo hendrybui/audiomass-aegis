@@ -2255,6 +2255,12 @@
 					vals[3].value = ret.confidence + '%';
 					status.innerHTML = 'Estimated ' + ret.beats + ' beats over ' + ret.duration + 's.';
 					setBusy (q, false);
+
+					// auto-set multitrack beat grid BPM
+					var mt = q.app.multitrack;
+					if (mt && mt.IsOn && mt.IsOn () && mt.SetBPM && ret.confidence > 15) {
+						mt.SetBPM (ret.bpm);
+					}
 				}, function ( msg ) {
 					if (q.job_id !== job) return ;
 					status.innerHTML = msg;

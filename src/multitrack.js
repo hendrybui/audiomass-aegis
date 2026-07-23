@@ -10,6 +10,7 @@
 		var clip_uid = 1;
 		var selected_track = null;
 		var selected_clip = null;
+		var selected_clips = {};
 		var editing_clip = null;
 		var default_px_per_sec = 86;
 		var default_row_h = app.isMobile ? 134 : 88;
@@ -28,9 +29,17 @@
 		var beat_bpm = 120;
 		var beat_sig = '4/4';
 		var beat_sigs = ['4/4', '3/4', '6/8'];
-		var region = null;
+	var region = null;
 		var xfades = {};
 		var master_vol = 1;
+
+		var mt_markers = [];
+		var mt_marker_uid = 0;
+		var mt_loops = [];
+		var mt_loop_uid = 0;
+		var mt_extras_panel = null;
+		var mt_extras_tab = null;
+		var mt_erase_mode = false;
 		var raf = 0;
 		var play_sync = 0;
 		var render_raf = 0;
@@ -68,6 +77,36 @@
 		var published_duration = -1;
 		var touch_down_time = 0;
 
+		function _audioBufferToWavBlob ( buffer ) {
+			var numCh = buffer.numberOfChannels;
+			var sr = buffer.sampleRate;
+			var len = buffer.length;
+			var chData = [];
+			for (var c = 0; c < numCh; c++) chData.push (buffer.getChannelData (c));
+			var interleaved = new Float32Array (len * numCh);
+			for (var i = 0; i < len; i++)
+				for (var ch = 0; ch < numCh; ch++)
+					interleaved[i * numCh + ch] = chData[ch][i];
+			var samples = new Int16Array (interleaved.length);
+			for (var j = 0; j < interleaved.length; j++) {
+				var s = Math.max (-1, Math.min (1, interleaved[j]));
+				samples[j] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+			}
+			var dataLen = samples.length * 2;
+			var ab = new ArrayBuffer (44 + dataLen);
+			var v = new DataView (ab);
+			var ws = function (o, str) { for (var k = 0; k < str.length; k++) v.setUint8 (o + k, str.charCodeAt (k)); };
+			ws (0, 'RIFF'); v.setUint32 (4, 36 + dataLen, true); ws (8, 'WAVE');
+			ws (12, 'fmt '); v.setUint32 (16, 16, true); v.setUint16 (20, 1, true);
+			v.setUint16 (22, numCh, true); v.setUint32 (24, sr, true);
+			v.setUint32 (28, sr * numCh * 2, true); v.setUint16 (32, numCh * 2, true);
+			v.setUint16 (34, 16, true); ws (36, 'data'); v.setUint32 (40, dataLen, true);
+			for (var p = 0; p < interleaved.length; p++) {
+				var ss = Math.max (-1, Math.min (1, interleaved[p]));
+				v.setInt16 (44 + p * 2, ss < 0 ? ss * 0x8000 : ss * 0x7FFF, true);
+			}
+			return new Blob ([v], {type: 'audio/wav'});
+		}
 		var el = null;
 		var side = null;
 		var tracks_wrap = null;
@@ -253,7 +292,7 @@
 						rec: t.rec
 					};
 				}),
-				clips: clips.map (function ( c ) {
+			clips: clips.map (function ( c ) {
 					return {
 						id: c.id,
 						track: c.track,
@@ -265,7 +304,15 @@
 						name: c.name,
 						buffer: c.buffer
 					};
-				})
+				}),
+				mt_markers: mt_markers.map (function ( m ) {
+					return { id: m.id, time: m.time, name: m.name };
+				}),
+				mt_marker_uid: mt_marker_uid,
+				mt_loops: mt_loops.map (function ( l ) {
+					return { id: l.id, start: l.start, end: l.end, name: l.name };
+				}),
+				mt_loop_uid: mt_loop_uid
 			};
 		}
 
@@ -330,10 +377,19 @@
 			px_per_sec = state.px_per_sec || default_px_per_sec;
 			row_h = state.row_h || default_row_h;
 			master_vol = state.master_vol === undefined ? 1 : state.master_vol;
-			xfades = state.xfades || {};
+		xfades = state.xfades || {};
 			cleanXfades ();
+			mt_markers = (state.mt_markers || []).map (function ( m ) {
+				return { id: m.id, time: m.time, name: m.name };
+			});
+			mt_marker_uid = state.mt_marker_uid || 0;
+			mt_loops = (state.mt_loops || []).map (function ( l ) {
+				return { id: l.id, start: l.start, end: l.end, name: l.name };
+			});
+			mt_loop_uid = state.mt_loop_uid || 0;
 			render ();
 			emitState ();
+			renderExtrasPanel ();
 		}
 
 		function nextNum ( arr, pref ) {
@@ -945,8 +1001,10 @@
 			if (empty_el) empty_el.style.display = clips.length ? 'none' : 'block';
 			updateHeaderButtons ();
 
-			if (main) main.scrollTop = old_top;
+		if (main) main.scrollTop = old_top;
 			syncScroll ();
+			renderMarkerOverlays ();
+			buildExtrasPanel ();
 			renderRegion ();
 			updatePlayhead ();
 			updateBeatUI ();
@@ -1089,7 +1147,7 @@
 				ctx.moveTo (x, 0);
 				ctx.lineTo (x, height);
 			}
-			ctx.strokeStyle = 'rgba(90,242,255,.09)';
+		ctx.strokeStyle = 'rgba(90,242,255,.28)';
 			ctx.stroke ();
 
 			n = first - (first % bar);
@@ -1099,8 +1157,19 @@
 				ctx.moveTo (x, 0);
 				ctx.lineTo (x, height);
 			}
-			ctx.strokeStyle = 'rgba(240,216,120,.22)';
+			ctx.strokeStyle = 'rgba(240,216,120,.55)';
 			ctx.stroke ();
+
+			// bar numbers
+			ctx.fillStyle = 'rgba(240,216,120,.7)';
+			ctx.font = (10 * ratio) + 'px ' + getComputedStyle(document.body).getPropertyValue('--ff-mono').trim();
+			n = first - (first % bar);
+			for (; n <= last; n += bar) {
+				var barNum = (n / bar) + 1;
+				if (barNum < 1) continue;
+				var bx = ((n * beat_px - left) >> 0) + 3;
+				ctx.fillText(barNum, bx * ratio, 10 * ratio);
+			}
 		}
 
 		function renderTrack ( track, top, h ) {
@@ -1885,7 +1954,7 @@
 			var ce = d.createElement ('div');
 			var tc = trackColor ( clip.track );
 			ce.className = 'pk_mt_clip' +
-				(clip.id === selected_clip ? ' pk_mt_clip_sel' : '') +
+				(selected_clips[clip.id] ? ' pk_mt_clip_sel' : '') +
 				(has_xf ? ' pk_mt_clip_xf' : '') +
 				(track && track.mute ? ' pk_mt_clip_muted' : '');
 			ce.setAttribute ('data-clip', clip.id);
@@ -1935,7 +2004,30 @@
 			};
 		}
 
-		function selectClip ( clip ) {
+	function selectClip ( clip, additive ) {
+			// eraser mode: delete instead of select
+			if (mt_erase_mode) { eraseCheck (clip.id); return; }
+			if (additive) {
+				// Shift+click: toggle clip in multi-select
+				if (selected_clips[clip.id]) {
+					delete selected_clips[clip.id];
+					if (selected_clip === clip.id) {
+						// Pick another from the set, or null
+						var keys = Object.keys (selected_clips);
+						selected_clip = keys.length > 0 ? keys[keys.length - 1] : null;
+						selected_track = selected_clip ? findClip(selected_clip).track : null;
+					}
+				} else {
+					selected_clips[clip.id] = true;
+					selected_clip = clip.id;
+					selected_track = clip.track;
+				}
+				render ();
+				app.fireEvent ('DidSelectClip', clip);
+				return;
+			}
+			selected_clips = {};
+			selected_clips[clip.id] = true;
 			if (selected_clip === clip.id && selected_track === clip.track) {
 				app.fireEvent ('DidSelectClip', clip);
 				return ;
@@ -1950,6 +2042,7 @@
 			if (!selected_clip) return false;
 			stopFxPreview ( true );
 			selected_clip = null;
+			selected_clips = {};
 			app.fireEvent ('DidDeselectClip');
 			if (!silent) app.fireEvent ('DidDestroyRegion');
 			render ();
@@ -2100,8 +2193,26 @@
 			mt_context.addOption ('Copy Clip', function () {
 				doContextClip ( copySelectedClip );
 			}, false);
-			mt_context.addOption ('Split Here', function () {
+		mt_context.addOption ('Split Here', function () {
 				doContextClip (function () { splitSelectedClip ( context_time ); });
+			}, false);
+			mt_context.addOption ('Slice → 4', function () {
+				doContextClip (function (clip) { sliceClipToSampler (clip.id, 4); });
+			}, false);
+			mt_context.addOption ('Slice → 8', function () {
+				doContextClip (function (clip) { sliceClipToSampler (clip.id, 8); });
+			}, false);
+			mt_context.addOption ('Slice → 16', function () {
+				doContextClip (function (clip) { sliceClipToSampler (clip.id, 16); });
+			}, false);
+			mt_context.addOption ('Slice by Beat', function () {
+				doContextClip (function (clip) { sliceClipToSampler (clip.id, 'beat'); });
+			}, false);
+			mt_context.addOption ('Slice by Bar', function () {
+				doContextClip (function (clip) { sliceClipToSampler (clip.id, 'bar'); });
+			}, false);
+			mt_context.addOption ('Join Clips', function () {
+				doContextClip ( joinSplitClips );
 			}, false);
 			mt_context.addOption ('Delete Clip', function () {
 				doContextClip ( deleteSelectedClip );
@@ -2114,8 +2225,11 @@
 			mt_context.addOption ('Fade In', function () {
 				doContextClip (function () { applyFx ('FadeIn'); });
 			}, false);
-			mt_context.addOption ('Fade Out', function () {
+		mt_context.addOption ('Fade Out', function () {
 				doContextClip (function () { applyFx ('FadeOut'); });
+			}, false);
+			mt_context.addOption ('Silence Clip', function () {
+				doContextClip (function () { silenceClipAudio (); });
 			}, false);
 			mt_context.onOpen = function ( menu, div ) {
 				var a = div.childNodes;
@@ -2544,7 +2658,7 @@
 				e.stopPropagation ();
 				if (!drag_mode && selected_clip !== clip.id) {
 					if (e.shiftKey) {
-						selectClip ( clip );
+						selectClip ( clip, true );
 						return ;
 					}
 					return startRangeSelect ( e, function ( ev ) {
@@ -2567,9 +2681,16 @@
 				last_ns = old_start;
 				stick_t = null;
 				stick_edge = 0;
-				prev = cloneState ();
+			prev = cloneState ();
 				moved = false;
 				did_move = false;
+
+				// store original start for all selected clips (multi-drag)
+				var _selIds = Object.keys (selected_clips);
+				for (var _si = 0; _si < _selIds.length; _si++) {
+					var _sc = findClip (_selIds[_si]);
+					if (_sc) _sc._drag_orig_start = _sc.start;
+				}
 				if (!app.ui.InteractionHandler.checkAndSet ('multitrack')) return (false);
 				ce.classList.add ('pk_drag');
 				if (drag_mode) startTrimView ();
@@ -2677,12 +2798,29 @@
 						}
 					}
 				}
+			var offset = Math.max (0, ns) - old_start;
 				clip.start = Math.max (0, ns);
 				last_ns = ns_raw;
 				publishDuration ();
 				ce.style.transform = 'translate3d(' +
 					(((clip.start - old_start) * px_per_sec) >> 0) +
 					'px,0,0)';
+
+				// move all other selected clips by the same offset
+				var selIds = Object.keys (selected_clips);
+				if (!drag_mode && selIds.length > 1) {
+					for (var si = 0; si < selIds.length; si++) {
+						var sid = selIds[si];
+						if (sid === clip.id) continue;
+						var sc = findClip (sid);
+						if (!sc) continue;
+						var scOld = sc.start;
+						sc.start = Math.max (0, sc._drag_orig_start + offset);
+						var scEl = document.querySelector ('[data-clip="' + sid + '"]');
+						if (scEl) scEl.style.transform = 'translate3d(' + (((sc.start - scOld) * px_per_sec) >> 0) + 'px,0,0)';
+					}
+				}
+
 				queuePlayRefresh ();
 			}
 
@@ -2692,10 +2830,29 @@
 				ce.classList.remove ('pk_drag');
 				ce.style.transform = '';
 				ce.style.willChange = '';
+				// reset transforms on all selected clip elements
+				var _selIds2 = Object.keys (selected_clips);
+				for (var _si2 = 0; _si2 < _selIds2.length; _si2++) {
+					var _scEl = document.querySelector ('[data-clip="' + _selIds2[_si2] + '"]');
+					if (_scEl && _scEl !== ce) _scEl.style.transform = '';
+				}
 				clearTrimView ();
 				app.ui.InteractionHandler.forceUnset ('multitrack');
 
+				// check if any selected clip actually moved
+				var multiMoved = false;
+				if (did_move && _selIds2.length > 1) {
+					for (var _si3 = 0; _si3 < _selIds2.length; _si3++) {
+						var _sc2 = findClip (_selIds2[_si3]);
+						if (_sc2 && _sc2._drag_orig_start !== undefined && Math.abs (_sc2.start - _sc2._drag_orig_start) > 0.001) {
+							multiMoved = true;
+						}
+						if (_sc2) delete _sc2._drag_orig_start;
+					}
+				}
+
 				if (did_move && (
+					multiMoved ||
 					Math.abs (clip.start - old_start) > 0.001 ||
 					Math.abs (clipIn (clip) - old_in) > 0.001 ||
 					Math.abs (clipOut (clip) - old_out) > 0.001 ||
@@ -2703,7 +2860,7 @@
 					Math.abs ((clip.fo || 0) - old_fo) > 0.001 ||
 					clip.track !== old_track
 				)) {
-					pushState ( prev, drag_mode > 2 ? 'Fade Clip' : (drag_mode ? 'Trim Clip' : 'Move Clip') );
+					pushState ( prev, drag_mode > 2 ? 'Fade Clip' : (drag_mode ? 'Trim Clip' : 'Move Clips') );
 					queuePlayRefresh ( true );
 					render ();
 					return ;
@@ -5136,10 +5293,159 @@
 			return true;
 		}
 
+		function joinSplitClips () {
+			// Collect selected clips
+			var sel_ids = Object.keys (selected_clips);
+
+			if (sel_ids.length < 2) {
+				// Single selection: try auto-find adjacent clip on same track
+				if (!selected_clip) return false;
+				var clip = findClip (selected_clip);
+				if (!clip) return false;
+
+				var sibling = null;
+				var is_left = false;
+				for (var i = 0; i < clips.length; ++i) {
+					var other = clips[i];
+					if (other === clip || other.track !== clip.track) continue;
+					// Left of other?
+					if (Math.abs (clip.start + clipLen (clip) - other.start) < 0.01) {
+						sibling = other; is_left = true; break;
+					}
+					// Right of other?
+					if (Math.abs (other.start + clipLen (other) - clip.start) < 0.01) {
+						sibling = other; is_left = false; break;
+					}
+				}
+				if (!sibling) {
+					OneUp ('No adjacent clip to join. Shift+click two clips first.', 2000);
+					return false;
+				}
+				return mergeClips (is_left ? clip : sibling, is_left ? sibling : clip);
+			}
+
+			// Multi-select: find exactly two clips from selection
+			var sel_clips = [];
+			for (var j = 0; j < sel_ids.length; ++j) {
+				var c = findClip (sel_ids[j]);
+				if (c) sel_clips.push (c);
+			}
+			if (sel_clips.length < 2) {
+				OneUp ('Select 2 clips to join', 1200);
+				return false;
+			}
+
+			// Sort by start time
+			sel_clips.sort (function (a, b) { return a.start - b.start; });
+
+			// If more than 2, just use the first two
+			var left = sel_clips[0];
+			var right = sel_clips[1];
+
+			if (left.track !== right.track) {
+				OneUp ('Clips must be on the same track', 1200);
+				return false;
+			}
+			if (Math.abs (left.start + clipLen (left) - right.start) > 0.01) {
+				OneUp ('Clips must be adjacent (no gap)', 1200);
+				return false;
+			}
+			// Safety: warn if sample rates differ (would cause sync issues)
+			if (left.buffer.sampleRate !== right.buffer.sampleRate) {
+				OneUp ('Cannot join — sample rates differ (' + left.buffer.sampleRate + ' vs ' + right.buffer.sampleRate + ')', 2500);
+				return false;
+			}
+			// Safety: warn if channel counts differ
+			if (left.buffer.numberOfChannels !== right.buffer.numberOfChannels) {
+				OneUp ('Warning — channel count differs (' + left.buffer.numberOfChannels + ' vs ' + right.buffer.numberOfChannels + '). Join will use the higher count.', 3000);
+			}
+
+			return mergeClips (left, right);
+		}
+
+		function mergeClips (left, right) {
+			var prev = cloneState ();
+
+			// Only use the fast path (expand bounds) for actual split clips:
+			// same buffer AND left.out === right.in (contiguous region in buffer)
+			var is_split = (left.buffer === right.buffer) &&
+				(Math.abs (clipOut (left) - clipIn (right)) < 0.005);
+
+			if (is_split) {
+				left.out = clipOut (right);
+				left.fo = right.fo || 0;
+				clampClipFades (left);
+			} else {
+				// Different buffers, or same buffer but non-contiguous (duplicate, etc.)
+				// Create a new merged buffer by concatenating
+				var ac = audioCtx ();
+				var left_dur = clipLen (left);
+				var right_dur = clipLen (right);
+				var merged_dur = left_dur + right_dur;
+				var num_ch = Math.max (
+					left.buffer.numberOfChannels,
+					right.buffer.numberOfChannels
+				);
+				var sr = left.buffer.sampleRate;
+
+				var merged = ac.createBuffer (num_ch, Math.ceil (merged_dur * sr), sr);
+				for (var ch = 0; ch < num_ch; ++ch) {
+					var dst = merged.getChannelData (ch);
+					// Copy left clip region
+					var src_l = ch < left.buffer.numberOfChannels
+						? left.buffer.getChannelData (ch) : null;
+					if (src_l) {
+						var off_l = Math.floor (clipIn (left) * sr);
+						var len_l = Math.floor (left_dur * sr);
+						for (var i = 0; i < len_l && (off_l + i) < src_l.length; ++i) {
+							dst[i] = src_l[off_l + i];
+						}
+					}
+					// Copy right clip region
+					var src_r = ch < right.buffer.numberOfChannels
+						? right.buffer.getChannelData (ch) : null;
+					if (src_r) {
+						var off_r = Math.floor (clipIn (right) * sr);
+						var len_r = Math.floor (right_dur * sr);
+						var dst_off = Math.floor (left_dur * sr);
+						for (var k = 0; k < len_r && (off_r + k) < src_r.length; ++k) {
+							dst[dst_off + k] = src_r[off_r + k];
+						}
+					}
+				}
+
+				// Replace left clip with merged buffer
+				left.buffer = merged;
+				left.in = 0;
+				left.out = merged_dur;
+				left.fi = 0;
+				left.fo = right.fo || 0;
+				clampClipFades (left);
+			}
+
+			clips.splice (clips.indexOf (right), 1);
+			selected_clip = left.id;
+			selected_clips = {};
+			selected_clips[left.id] = true;
+
+			pushState (prev, 'Join Clips');
+			queuePlayRefresh (true);
+			render ();
+			app.fireEvent ('DidSelectClip', left);
+			OneUp ('Joined Clips', 900);
+			return true;
+		}
+
 		q.IsOn = IsOn;
 		q.ExportSession = ExportSession;
 		q.LoadSessionBuffer = LoadSessionBuffer;
 		q.LoadSessionFiles = LoadSessionFiles;
+		q.GetState = cloneState;
+		q.RestoreProjectState = function ( state ) {
+			restoreState (state);
+			render ();
+			app.fireEvent ('DidUpdateMultitrack');
+		};
 		q.AddFilesAuto = function ( file_list ) {
 			if (!file_list || !file_list.length) return false;
 			if (file_list.length > 1) {
@@ -5176,7 +5482,439 @@
 		q.HasClips = hasClips;
 		q.Mixdown = Mixdown;
 		q.MixdownAsync = MixdownAsync;
+		q.DownloadAllStems = function ( baseName ) {
+			if (!clips.length) {
+				OneUp ('Nothing to export', 1200);
+				return;
+			}
+			var name = baseName || 'stem';
+			// collect (track, clip) pairs first
+			var pairs = [];
+			for (var i = 0; i < tracks.length; ++i) {
+				var track = tracks[i];
+				for (var j = 0; j < clips.length; ++j) {
+					if (clips[j].track !== track.id) continue;
+					pairs.push ({ track: track, clip: clips[j], idx: i });
+					break;
+				}
+			}
+			if (!pairs.length) {
+				OneUp ('No clips to export', 1200);
+				return;
+			}
+			OneUp ('Downloading ' + pairs.length + ' stems...', 2000);
+			app.fireEvent ('WillDownloadFile');
+			var delay = 300;
+			pairs.forEach (function (pair, k) {
+				setTimeout (function () {
+					try {
+						var buf = copyClipBuffer (pair.clip);
+						var blob = _audioBufferToWavBlob (buf);
+						var url = (w.URL || w.webkitURL).createObjectURL (blob);
+						var a = d.createElement ('a');
+						a.href = url;
+						a.download = name + ' - ' + (pair.track.name || 'Track ' + (pair.idx + 1)) + '.wav';
+						d.body.appendChild (a);
+						a.click ();
+						d.body.removeChild (a);
+						setTimeout (function () { (w.URL || w.webkitURL).revokeObjectURL (url); }, 1000 );
+					} catch (e) {
+						console.error ('DownloadAllStems error:', e);
+						OneUp ('Error exporting track', 2000);
+					}
+					if (k === pairs.length - 1) {
+						OneUp ('All stems downloaded', 1200);
+						app.fireEvent ('DidDownloadFile');
+					}
+				}, k * delay);
+			});
+};
+
+		// ── Markers, Loops, Slice-to-Sampler ──────────────────
+
+		function addMTMarker (time, name) {
+			var prev = cloneState ();
+			mt_markers.push ({
+				id: 'mk' + (mt_marker_uid++),
+				time: time !== undefined ? time : cursor,
+				name: name || ('M' + mt_markers.length + 1)
+			});
+			mt_markers.sort (function (a, b) { return a.time - b.time; });
+			pushState (prev, 'Add Marker');
+			renderExtrasPanel ();
+			render ();
+		}
+
+		function removeMTMarker (id) {
+			var prev = cloneState ();
+			mt_markers = mt_markers.filter (function (m) { return m.id !== id; });
+			pushState (prev, 'Remove Marker');
+			renderExtrasPanel ();
+			render ();
+		}
+
+		function renameMTMarker (id, name) {
+			for (var i = 0; i < mt_markers.length; i++) {
+				if (mt_markers[i].id === id) { mt_markers[i].name = name; break; }
+			}
+			render ();
+		}
+
+		function gotoMTMarker (id) {
+			for (var i = 0; i < mt_markers.length; i++) {
+				if (mt_markers[i].id === id) {
+					setCursorTime (mt_markers[i].time);
+					break;
+				}
+			}
+		}
+
+		function saveMTLoop (start, end, name) {
+			var prev = cloneState ();
+			mt_loops.push ({
+				id: 'lp' + (mt_loop_uid++),
+				start: start,
+				end: end,
+				name: name || ('Loop ' + mt_loops.length + 1)
+			});
+			pushState (prev, 'Save Loop');
+			renderExtrasPanel ();
+		}
+
+		function removeMTLoop (id) {
+			var prev = cloneState ();
+			mt_loops = mt_loops.filter (function (l) { return l.id !== id; });
+			pushState (prev, 'Remove Loop');
+			renderExtrasPanel ();
+		}
+
+		function activateMTLoop (id) {
+			for (var i = 0; i < mt_loops.length; i++) {
+				if (mt_loops[i].id === id) {
+					setRegion (mt_loops[i].start, mt_loops[i].end, true);
+					if (region) { region.loop = true; app.fireEvent ('DidSetLoop', true); }
+					break;
+				}
+			}
+		}
+
+		function quickLoopBars (bars) {
+			var step = beatStep ();
+			var sig = beatBar ();
+			var len = step * sig * bars;
+			var start = cursor;
+			var end = start + len;
+			if (end > duration ()) end = duration ();
+			setRegion (start, end, true);
+			if (region) { region.loop = true; app.fireEvent ('DidSetLoop', true); }
+		}
+
+		function sliceClipToSampler (clipId, mode) {
+			var clip = findClip (clipId);
+			if (!clip) return;
+			var len = clipLen (clip);
+			var numSlices = mode;
+
+			if (mode === 'beat') {
+				var step = beatStep ();
+				numSlices = Math.max (1, Math.floor (len / step));
+			} else if (mode === 'bar') {
+				var barLen = beatStep () * beatBar ();
+				numSlices = Math.max (1, Math.floor (len / barLen));
+			}
+
+			numSlices = Math.min (64, Math.max (2, numSlices));
+			var sliceLen = len / numSlices;
+			var prev = cloneState ();
+
+			// trim original clip to first slice
+			var origIn = clipIn (clip);
+			clip.out = origIn + sliceLen;
+			clip.fo = 0;
+			clampClipFades (clip);
+
+			// create remaining slices
+			for (var i = 1; i < numSlices; i++) {
+				var sIn = origIn + i * sliceLen;
+				var sOut = origIn + Math.min ((i + 1) * sliceLen, clipOut (clip) - origIn + clipIn (clip));
+				var newClip = {
+					id: 'mc' + (clip_uid++),
+					track: clip.track,
+					start: clip.start + i * sliceLen,
+					in: sIn,
+					out: sOut,
+					fi: 0,
+					fo: 0,
+					name: clip.name + ' ' + (i + 1),
+					buffer: clip.buffer
+				};
+				clampClipFades (newClip);
+				clips.push (newClip);
+			}
+
+			pushState (prev, 'Slice to Sampler (' + numSlices + ')');
+			queuePlayRefresh (true);
+			render ();
+			OneUp ('Sliced into ' + numSlices + ' pieces', 1500);
+		}
+
+		// ── Extras Panel UI ──────────────────────────────
+
+		function buildExtrasPanel () {
+			// tab buttons in beat bar (only once)
+			if (beat_bar && !beat_bar._extras_built) {
+				beat_bar._extras_built = true;
+				mt_extras_tab = d.createElement ('div');
+				mt_extras_tab.className = 'pk_mt_extras_tab';
+
+				var btnMarkers = makeButton ('MK', 'Markers', false, 'pk_btn pk_mtbeat_btn pk_mt_ext_btn');
+				var btnLoops = makeButton ('LP', 'Loops', false, 'pk_btn pk_mtbeat_btn pk_mt_ext_btn');
+				var btnSlicer = makeButton ('SL', 'Slicer', false, 'pk_btn pk_mtbeat_btn pk_mt_ext_btn');
+				var btnEraser = makeButton ('✕', 'Eraser', false, 'pk_btn pk_mtbeat_btn pk_mt_ext_btn');
+
+				btnMarkers.onclick = function () { toggleExtrasPanel ('markers'); };
+				btnLoops.onclick = function () { toggleExtrasPanel ('loops'); };
+				btnSlicer.onclick = function () { toggleExtrasPanel ('slicer'); };
+				btnEraser.onclick = function () { toggleEraseMode (); };
+
+				mt_extras_tab.appendChild (btnMarkers);
+				mt_extras_tab.appendChild (btnLoops);
+				mt_extras_tab.appendChild (btnSlicer);
+				mt_extras_tab.appendChild (btnEraser);
+				beat_bar.appendChild (mt_extras_tab);
+			}
+		}
+
+		function toggleExtrasPanel (tab) {
+			if (mt_extras_panel && mt_extras_panel._tab === tab) {
+				// close
+				mt_extras_panel.parentNode.removeChild (mt_extras_panel);
+				mt_extras_panel = null;
+				return;
+			}
+			if (!mt_extras_panel) {
+				mt_extras_panel = d.createElement ('div');
+				mt_extras_panel.className = 'pk_mt_extras_panel';
+				el.parentNode.appendChild (mt_extras_panel);
+			}
+			mt_extras_panel._tab = tab;
+			renderExtrasPanel ();
+		}
+
+		function renderExtrasPanel () {
+			if (!mt_extras_panel) return;
+			var tab = mt_extras_panel._tab || 'markers';
+			var html = '';
+
+			if (tab === 'markers') {
+				html += '<div class="pk_ext_header">MARKERS <a class="pk_ext_add">+ Add at cursor</a></div>';
+				if (mt_markers.length === 0) {
+					html += '<div class="pk_ext_empty">No markers yet. Press M to add.</div>';
+				} else {
+					html += '<div class="pk_ext_list">';
+					for (var i = 0; i < mt_markers.length; i++) {
+						var m = mt_markers[i];
+						html += '<div class="pk_ext_item" data-id="' + m.id + '">' +
+							'<span class="pk_ext_goto" data-id="' + m.id + '">▶</span>' +
+							'<input class="pk_ext_name" data-id="' + m.id + '" value="' + m.name.replace(/"/g, '&quot;') + '" />' +
+							'<span class="pk_ext_time">' + formatTime (m.time) + '</span>' +
+							'<span class="pk_ext_del" data-id="' + m.id + '">✕</span>' +
+							'</div>';
+					}
+					html += '</div>';
+				}
+			} else if (tab === 'loops') {
+				html += '<div class="pk_ext_header">LOOPS <a class="pk_ext_save_loop">+ Save region</a></div>';
+				html += '<div class="pk_ext_quick">';
+				html += '<a class="pk_ext_qloop" data-bars="4">4 Bar</a>';
+				html += '<a class="pk_ext_qloop" data-bars="8">8 Bar</a>';
+				html += '<a class="pk_ext_qloop" data-bars="16">16 Bar</a>';
+				html += '</div>';
+				if (mt_loops.length === 0) {
+					html += '<div class="pk_ext_empty">No loops saved. Make a selection and save.</div>';
+				} else {
+					html += '<div class="pk_ext_list">';
+					for (var j = 0; j < mt_loops.length; j++) {
+						var l = mt_loops[j];
+						html += '<div class="pk_ext_item" data-id="' + l.id + '">' +
+							'<span class="pk_ext_play_loop" data-id="' + l.id + '">▶</span>' +
+							'<input class="pk_ext_lname" data-id="' + l.id + '" value="' + l.name.replace(/"/g, '&quot;') + '" />' +
+							'<span class="pk_ext_range">' + formatTime (l.start) + ' → ' + formatTime (l.end) + '</span>' +
+							'<span class="pk_ext_del" data-id="' + l.id + '">✕</span>' +
+							'</div>';
+					}
+					html += '</div>';
+				}
+			} else if (tab === 'slicer') {
+				html += '<div class="pk_ext_header">SLICE TO SAMPLER</div>';
+				html += '<div class="pk_ext_empty">Select a clip, then choose slice mode:</div>';
+				html += '<div class="pk_ext_quick">';
+				html += '<a class="pk_ext_slice" data-mode="4">4 slices</a>';
+				html += '<a class="pk_ext_slice" data-mode="8">8 slices</a>';
+				html += '<a class="pk_ext_slice" data-mode="16">16 slices</a>';
+				html += '<a class="pk_ext_slice" data-mode="32">32 slices</a>';
+				html += '</div>';
+				html += '<div class="pk_ext_quick">';
+				html += '<a class="pk_ext_slice" data-mode="beat">By Beat</a>';
+				html += '<a class="pk_ext_slice" data-mode="bar">By Bar</a>';
+				html += '</div>';
+			}
+
+			mt_extras_panel.innerHTML = html;
+
+			// wire events
+			var addBtn = mt_extras_panel.querySelector ('.pk_ext_add');
+			if (addBtn) addBtn.onclick = function () { addMTMarker (cursor); };
+
+			var saveBtn = mt_extras_panel.querySelector ('.pk_ext_save_loop');
+			if (saveBtn) saveBtn.onclick = function () {
+				if (region) saveMTLoop (region.start, region.end);
+				else OneUp ('Make a selection first', 1200);
+			};
+
+			var qloops = mt_extras_panel.querySelectorAll ('.pk_ext_qloop');
+			for (var qi = 0; qi < qloops.length; qi++) {
+				(function (el) {
+					el.onclick = function () { quickLoopBars (parseInt (el.getAttribute ('data-bars'))); };
+				})(qloops[qi]);
+			}
+
+			var slices = mt_extras_panel.querySelectorAll ('.pk_ext_slice');
+			for (var si = 0; si < slices.length; si++) {
+				slices[si].onclick = function () {
+					if (!selected_clip) { OneUp ('Select a clip first', 1200); return; }
+					var mode = this.getAttribute ('data-mode');
+					if (mode === 'beat' || mode === 'bar') sliceClipToSampler (selected_clip, mode);
+					else sliceClipToSampler (selected_clip, parseInt (mode));
+				};
+			}
+
+			// marker events
+			var gotos = mt_extras_panel.querySelectorAll ('.pk_ext_goto');
+			for (var gi = 0; gi < gotos.length; gi++) {
+				gotos[gi].onclick = function () { gotoMTMarker (this.getAttribute ('data-id')); };
+			}
+			var dels = mt_extras_panel.querySelectorAll ('.pk_ext_del');
+			for (var di = 0; di < dels.length; di++) {
+				dels[di].onclick = function () {
+					var id = this.getAttribute ('data-id');
+					if (mt_extras_panel._tab === 'markers') removeMTMarker (id);
+					else removeMTLoop (id);
+				};
+			}
+			var playLoops = mt_extras_panel.querySelectorAll ('.pk_ext_play_loop');
+			for (var pi = 0; pi < playLoops.length; pi++) {
+				playLoops[pi].onclick = function () { activateMTLoop (this.getAttribute ('data-id')); };
+			}
+			// rename inputs
+			var nameInputs = mt_extras_panel.querySelectorAll ('.pk_ext_name');
+			for (var ni = 0; ni < nameInputs.length; ni++) {
+				nameInputs[ni].onchange = function () {
+					renameMTMarker (this.getAttribute ('data-id'), this.value);
+				};
+			}
+			var lnameInputs = mt_extras_panel.querySelectorAll ('.pk_ext_lname');
+			for (var li = 0; li < lnameInputs.length; li++) {
+				lnameInputs[li].onchange = function () {
+					for (var ii = 0; ii < mt_loops.length; ii++) {
+						if (mt_loops[ii].id === this.getAttribute ('data-id')) {
+							mt_loops[ii].name = this.value;
+							break;
+						}
+					}
+				};
+			}
+		}
+
+		function formatTime (t) {
+			var min = (t / 60) >> 0;
+			var sec = ((t % 60) * 1000 >> 0) / 1000;
+			return min + ':' + (sec < 10 ? '0' : '') + sec.toFixed (1);
+		}
+
+		// ── Eraser Mode ──────────────────────────────────
+
+		function toggleEraseMode () {
+			mt_erase_mode = !mt_erase_mode;
+			// update button style
+			var btns = mt_extras_tab ? mt_extras_tab.querySelectorAll ('.pk_mt_ext_btn') : [];
+			for (var i = 0; i < btns.length; i++) {
+				if (btns[i].textContent.indexOf ('✕') >= 0) {
+					if (mt_erase_mode) btns[i].classList.add ('pk_act');
+					else btns[i].classList.remove ('pk_act');
+				}
+			}
+			// change cursor on lanes
+			var lanes = document.querySelector ('.pk_mt_lanes');
+			if (lanes) lanes.style.cursor = mt_erase_mode ? 'crosshair' : '';
+			OneUp (mt_erase_mode ? 'Eraser ON — click clip to delete' : 'Eraser OFF', 1000);
+		}
+
+		// hook into clip click — if erase mode, delete instead of select
+		function eraseCheck (clip_id) {
+			if (!mt_erase_mode) return false;
+			var prev = cloneState ();
+			var idx = findClipIndex (clip_id);
+			if (idx < 0) return true;
+			var clip = clips[idx];
+			// remove DOM
+			var ce = document.querySelector ('[data-clip="' + clip_id + '"]');
+			if (ce) ce.parentNode.removeChild (ce);
+			clips.splice (idx, 1);
+			delete selected_clips[clip_id];
+			if (selected_clip === clip_id) selected_clip = null;
+			publishDuration ();
+			render ();
+			registerUndo ('Erase Clip', prev);
+			return true;
+		}
+
+		// silence clip audio (zero out the buffer)
+		function silenceClipAudio () {
+			var clip = findClip (selected_clip);
+			if (!clip || !clip.buffer) return;
+			var prev = cloneState ();
+			var buf = clip.buffer;
+			var newBuf = app.engine.wavesurfer.backend.ac.createBuffer (
+				buf.numberOfChannels, buf.length, buf.sampleRate
+			);
+			for (var ch = 0; ch < buf.numberOfChannels; ch++) {
+				newBuf.copyToChannel (new Float32Array (buf.length), ch);
+			}
+			clip.buffer = newBuf;
+			render ();
+			registerUndo ('Silence Clip', prev);
+			OneUp ('Clip silenced', 800);
+		}
+
+		function renderMarkerOverlays () {
+			if (!ruler) return;
+			// remove old
+			var old = ruler.querySelectorAll ('.pk_mt_mk_ov');
+			for (var oi = 0; oi < old.length; oi++) old[oi].parentNode.removeChild (old[oi]);
+
+			var scrollLeft = main ? main.scrollLeft : 0;
+			var viewW = main ? main.clientWidth : 800;
+
+			for (var i = 0; i < mt_markers.length; i++) {
+				var mk = mt_markers[i];
+				var x = (mk.time * px_per_sec) >> 0;
+				if (x < scrollLeft - 60 || x > scrollLeft + viewW + 60) continue;
+
+				var ov = d.createElement ('div');
+				ov.className = 'pk_mt_mk_ov';
+				ov.style.left = x + 'px';
+				ov.title = mk.name + ' (' + formatTime (mk.time) + ')';
+				ov.innerHTML = '<span class="pk_mt_mk_tri">▼</span><span class="pk_mt_mk_lbl">' + mk.name + '</span>';
+				ov.onclick = (function (id) {
+					return function () { gotoMTMarker (id); };
+				})(mk.id);
+				ruler.appendChild (ov);
+			}
+		}
+
 		q.GetTempoBuffer = GetTempoBuffer;
+		q.SetBPM = function ( bpm ) { setBeatBpm ( bpm ); };
 		q.RecordToggle = RecordToggle;
 		q.RecordStart = RecordStart;
 		q.RecordStop = RecordStop;
@@ -5326,9 +6064,13 @@
 				if (region.loop) setCursorTime ( region.start );
 				return true;
 			}
-			if (id === 'RequestDeselect' || id === 'RequestRegionClear') {
+		if (id === 'RequestDeselect' || id === 'RequestRegionClear') {
 				var cleared_region = clearRegion ();
 				clearSelectedClip ( cleared_region );
+				return true;
+			}
+			if (id === 'RequestAddMarker') {
+				addMTMarker (cursor);
 				return true;
 			}
 			if (id === 'RequestActionCopy') {
@@ -5351,6 +6093,12 @@
 				deleteSelectedClip ();
 				return true;
 			}
+			if (id === 'RequestActionJoin') {
+				if (/INPUT|TEXTAREA|SELECT/.test ((d.activeElement && d.activeElement.tagName) || ''))
+					return true;
+				joinSplitClips ();
+				return true;
+			}
 			if (id === 'RequestActionCrossfade') {
 				return toggleXfade ();
 			}
@@ -5369,6 +6117,25 @@
 
 			return false;
 		};
+
+		// Stem separation integration: add stems from decoded AudioBuffers
+		q.AddStemsFromBuffers = function ( stemsMap ) {
+			var prev = cloneState ();
+			for ( var name in stemsMap ) {
+				if ( !stemsMap.hasOwnProperty( name ) ) continue;
+				addTrack ();
+				var newTrack = tracks[ tracks.length - 1 ];
+				newTrack.name = name;
+				var clip = makeClip ( newTrack.id, 0, stemsMap[ name ], name );
+				clips.push ( clip );
+			}
+			pushState ( prev, 'Stem Separation' );
+			render ();
+			app.fireEvent ( 'DidUpdateMultitrack' );
+		};
+
+		// expose audioCtx for stems module
+		q._getAudioCtx = audioCtx;
 
 		app.listenFor ('RequestOriginalEditor', function () {
 			if (IsOn ()) Toggle ( false );

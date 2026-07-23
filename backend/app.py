@@ -1,0 +1,48 @@
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
+
+from api.jobs import router as jobs_router
+from api.projects import router as projects_router
+from api.streams import router as streams_router
+from services.job_service import job_service
+
+SRC_DIR = Path(__file__).resolve().parents[1] / "src"
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(title="AudioMass + Splinter-X", version="0.1.0")
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # API routes first, then static files catch-all
+    app.include_router(jobs_router, prefix="/api")
+    app.include_router(projects_router, prefix="/api")
+    app.include_router(streams_router, prefix="/api")
+
+    @app.get("/api/health")
+    async def health() -> dict:
+        return {"status": "ok", "service": "audiomass-stems"}
+
+    @app.get("/api/tools")
+    async def tools() -> dict:
+        return {
+            "status": "ok",
+            "notes": "Tool readiness is currently inferred by pipeline adapters at runtime.",
+            "active_job": job_service.get_job(job_service._active_job_id).model_dump() if job_service._active_job_id else None,
+        }
+
+    # Serve AudioMass static files (must be last — catch-all)
+    app.mount("/", StaticFiles(directory=str(SRC_DIR), html=True), name="static")
+
+    return app
+
+
+app = create_app()

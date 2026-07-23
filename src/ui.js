@@ -432,6 +432,29 @@
 						},
 
 					{
+						name: 'Download All Stems',
+						action: function ( e ) {
+							var mt = activeMultitrackFor ( app );
+							if (mt && mt.DownloadAllStems) {
+								mt.DownloadAllStems ();
+							}
+						},
+						clss: 'pk_inact',
+						setup: function ( obj ) {
+							obj.setAttribute('data-id', 'dlall');
+							function setStemsReady () {
+								var mt = activeMultitrackFor ( app );
+								if (mt) obj.classList.remove ('pk_inact');
+								else obj.classList.add ('pk_inact');
+							}
+							app.listenFor ('DidUpdateMultitrack', setStemsReady);
+							app.listenFor ('DidLoadFile', setStemsReady);
+							app.listenFor ('DidUnloadFile', setStemsReady);
+							setStemsReady ();
+						}
+					},
+
+					{
 						name: 'Load from Computer',
 						type: 'file',
 						action: function ( e ) {
@@ -525,6 +548,80 @@
 						action: function ( e ) {
 							app.fireEvent('RequestActionNewRec');
 						}
+					},
+
+					{
+						name: '---'
+					},
+
+					{
+						name: 'Save Project',
+						clss: 'pk_inact',
+						action: function ( e ) {
+							var mt = activeMultitrackFor ( app );
+							if (!mt) return;
+
+							// ask for project name
+							new PKSimpleModal({
+								title: 'Save Project',
+								ondestroy: function () {
+									app.ui.InteractionHandler.on = false;
+									app.ui.KeyHandler.removeCallback ('modalTemp');
+									app.ui.KeyHandler.removeCallback ('modalTempEnter');
+								},
+								buttons: [
+									{
+										title: 'Save',
+										clss: 'pk_modal_a_accpt',
+										callback: function ( modal ) {
+											var input = modal.el_body.getElementsByTagName('input')[0];
+											var projectName = (input.value || '').trim() || 'Untitled Project';
+											app._saveProject (projectName, mt);
+											modal.Destroy ();
+										}
+									}
+								],
+								body: '<div style="padding:8px">' +
+									'<label style="color:#aaa">Project Name</label><br/>' +
+									'<input type="text" value="My Project" style="width:100%;padding:6px;margin-top:4px;color:#000" />' +
+									'</div>',
+								setup: function ( modal ) {
+									setTimeout (function () {
+										var inp = modal.el_body.getElementsByTagName('input')[0];
+										if (inp) { inp.focus(); inp.select(); }
+									}, 50);
+									app.ui.KeyHandler.addCallback ('modalTempEnter', function () {
+										var inp = modal.el_body.getElementsByTagName('input')[0];
+										var projectName = (inp && inp.value || '').trim() || 'Untitled Project';
+										app._saveProject (projectName, mt);
+										modal.Destroy ();
+									}, [13]);
+								}
+							}).Show ();
+						},
+						setup: function ( obj ) {
+							obj.setAttribute('data-id', 'saveproj');
+							function setSaveReady () {
+								var mt = activeMultitrackFor ( app );
+								if (mt) obj.classList.remove ('pk_inact');
+								else obj.classList.add ('pk_inact');
+							}
+							app.listenFor ('DidUpdateMultitrack', setSaveReady);
+							app.listenFor ('DidLoadFile', setSaveReady);
+							app.listenFor ('DidUnloadFile', setSaveReady);
+							setSaveReady ();
+						}
+					},
+
+					{
+						name: 'Load Project',
+						action: function ( e ) {
+							app._loadProjectList ();
+						}
+					},
+
+					{
+						name: '---'
 					},
 
 					{
@@ -3278,6 +3375,12 @@
 			UI.fireEvent( 'RequestActionCut', 1);
 			this.blur();
 		};
+
+		// Join Clips keyboard shortcut: Ctrl+J
+		UI.KeyHandler.addCallback ('KeyJoinClips', function ( key, map, e ) {
+			if (e) e.preventDefault();
+			UI.fireEvent ('RequestActionJoin');
+		}, [17, 74]);
 		UI.listenFor ('DidSelectClip', function () {
 			copy_btn.classList.remove ('pk_inact');
 			cut_btn.classList.remove ('pk_inact');
@@ -3390,6 +3493,20 @@
 		toolbar.appendChild ( btn_groups );
 		btn_groups.appendChild ( transport );
 		btn_groups.appendChild ( actions );
+
+		// Stem separation button - added at end of toolbar
+		var btn_stems = d.createElement ('button');
+		btn_stems.setAttribute ('tabIndex', -1);
+		btn_stems.setAttribute ('title', 'Separate Stems');
+		btn_stems.className = 'pk_btn';
+		btn_stems.textContent = '♫ Stems';
+		btn_stems.style.cssText = 'width:auto!important;min-width:52px;font-size:12px;color:#e94560;font-weight:bold;padding:0 8px;';
+		btn_stems.onclick = function () {
+			if (PKAudioEditor.stems) PKAudioEditor.stems.startSeparation ();
+			this.blur ();
+		};
+		transport.appendChild ( btn_stems );
+
 		toolbar.appendChild ( selection );
 
 		container.appendChild ( toolbar );

@@ -658,11 +658,19 @@
 			app.ui.TopHeader.openMenu (-1);
 		}, 96);
 
-		app.ui.KeyHandler.addSingleCallback ('KeyQ', function ( e ) {
+	app.ui.KeyHandler.addSingleCallback ('KeyQ', function ( e ) {
 			if (app.ui.InteractionHandler.on) return ;
 			e.preventDefault();
 			app.fireEvent ('RequestDeselect');
 		}, 113);
+
+		// M key = Add marker at cursor
+		app.ui.KeyHandler.addSingleCallback ('KeyM', function ( e ) {
+			if (app.ui.InteractionHandler.on) return ;
+			if (/INPUT|TEXTAREA|SELECT/.test ((d.activeElement && d.activeElement.tagName) || '')) return ;
+			e.preventDefault();
+			app.fireEvent ('RequestAddMarker');
+		}, 109);
 
 
 		app.ui.KeyHandler.addCallback ('kF12', function ( k, i, e ) {
