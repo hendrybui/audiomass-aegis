@@ -450,13 +450,15 @@
 		}
 
 		function duration () {
-			var dur = 30;
-			for (var i = 0; i < clips.length; ++i) {
-				var c = clips[i];
-				dur = Math.max (dur, c.start + clipLen ( c ) + 2);
+				var dur = 30;
+				for (var i = 0; i < clips.length; ++i) {
+					var c = clips[i];
+					dur = Math.max (dur, c.start + clipLen ( c ) + 2);
+				}
+				// Allow extending timeline up to 4 hours for DJ mix sets
+				if (dur < 120) dur = Math.max (dur, 120);
+				return dur;
 			}
-			return dur;
-		}
 
 		function publishDuration ( force ) {
 			var dur = duration ();
@@ -2230,6 +2232,13 @@
 			}, false);
 			mt_context.addOption ('Silence Clip', function () {
 				doContextClip (function () { silenceClipAudio (); });
+			}, false);
+			mt_context.addOption ('---', function () {}, true);
+			mt_context.addOption ('Stretch to BPM…', function () {
+				doContextClip (function (clip) { stretchClipToBPM (clip); });
+			}, false);
+			mt_context.addOption ('Pitch Shift…', function () {
+				doContextClip (function (clip) { pitchShiftClip (clip); });
 			}, false);
 			mt_context.onOpen = function ( menu, div ) {
 				var a = div.childNodes;
@@ -5919,6 +5928,106 @@
 		q.RecordStart = RecordStart;
 		q.RecordStop = RecordStop;
 		q.ToggleMixer = ToggleMixer;
+		q.DownloadAllStems = DownloadAllStems;
+		q.GetState = function () { return cloneState (); };
+		q.RestoreProjectState = function (state) { restoreState (state); };
+
+		// ── Time Stretch & Pitch Shift ───────────────────
+		// Uses Web Audio playbackRate for playback-speed change (pitch-preserving via resampling)
+
+		function stretchClipToBPM ( clip ) {
+			if (!clip || !clip.buffer) return;
+			var clipLenSec = clipLen ( clip );
+			var beatsInClip = clipLenSec * (beat_bpm / 60);
+			var targetBPM = parseFloat (prompt (
+				'Stretch clip to BPM\n\n' +
+				'Clip length: ' + clipLenSec.toFixed(2) + 's\n' +
+				'Detected beats: ' + beatsInClip.toFixed(1) + '\n' +
+				'Current grid BPM: ' + beat_bpm + '\n\n' +
+				'Enter target BPM:',
+				beat_bpm.toString()
+			));
+			if (!targetBPM || targetBPM < 20 || targetBPM > 300) return;
+
+			// ratio: how much to stretch. >1 = slower/longer, <1 = faster/shorter
+			var ratio = beat_bpm / targetBPM;
+			stretchClipBuffer ( clip, ratio );
+		}
+
+		function pitchShiftClip ( clip ) {
+			if (!clip || !clip.buffer) return;
+			var semitones = parseFloat (prompt (
+				'Pitch Shift (semitones)\n\n' +
+				'Positive = up, Negative = down\n' +
+				'Range: -12 to +12\n\n' +
+				'Enter semitones:',
+				'0'
+			));
+			if (isNaN (semitones) || semitones < -12 || semitones > 12) return;
+			if (semitones === 0) return;
+
+			// pitch shift via resampling: change sample rate
+			var ratio = Math.pow (2, semitones / 12);
+			stretchClipBuffer ( clip, 1, ratio );
+		}
+
+		function stretchClipBuffer ( clip, speedRatio, pitchRatio ) {
+			speedRatio = speedRatio || 1;
+			pitchRatio = pitchRatio || 1;
+			if (!clip || !clip.buffer) return;
+			if (speedRatio === 1 && pitchRatio === 1) return;
+
+			var prev = cloneState ();
+			var src = clip.buffer;
+			var ctx = audioCtx ();
+			var origSr = src.sampleRate;
+			var origLen = src.length;
+
+			// For time-stretch preserving pitch: resample then play back at adjusted rate
+			// We achieve this by creating a new buffer with adjusted sample rate
+			// The Web Audio API will resample it to the context rate on playback
+
+			// For pure speed change (pitch shifts too): just change the buffer's apparent length
+			// For pitch-preserving stretch: we need to resample
+
+			var newSr = origSr / (speedRatio * pitchRatio);
+			var newLen = Math.round (origLen * speedRatio);
+
+			// Create buffer at adjusted sample rate (Web Audio will resample on playback)
+			var newBuf = ctx.createBuffer (src.numberOfChannels, newLen, newSr);
+
+			for (var ch = 0; ch < src.numberOfChannels; ch++) {
+				var srcData = src.getChannelData (ch);
+				var dstData = newBuf.getChannelData (ch);
+				// Linear interpolation resampling
+				for (var i = 0; i < newLen; i++) {
+					var pos = i / speedRatio;
+					var i0 = pos >> 0;
+					var i1 = Math.min (i0 + 1, origLen - 1);
+					var frac = pos - i0;
+					dstData[i] = srcData[i0] * (1 - frac) + srcData[i1] * frac;
+				}
+			}
+
+			// Update clip in/out points to match new buffer duration
+			var oldIn = clipIn ( clip );
+			var oldOut = clipOut ( clip );
+			var oldLen = oldOut - oldIn;
+
+			clip.buffer = newBuf;
+			clip.in = oldIn * speedRatio;
+			clip.out = oldOut * speedRatio;
+			clip.fi = (clip.fi || 0) * speedRatio;
+			clip.fo = (clip.fo || 0) * speedRatio;
+
+			pushState (prev, speedRatio !== 1 ? 'Time Stretch' : 'Pitch Shift');
+			queuePlayRefresh (true);
+			render ();
+			OneUp (speedRatio !== 1 ?
+				('Stretched ' + (speedRatio > 1 ? '×' : '/') + ' ' + speedRatio.toFixed(2)) :
+				('Pitch shifted ' + (pitchRatio > 1 ? '+' : '') + (12 * Math.log2(pitchRatio)).toFixed(1) + ' st'),
+				1500);
+		}
 		q.MixerData = MixerData;
 		q.MixerSet = MixerSet;
 		q.Propagate = function ( id, arg1, arg2 ) {

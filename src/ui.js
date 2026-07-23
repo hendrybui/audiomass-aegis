@@ -3091,7 +3091,13 @@
 			var time_s = time >> 0;
 			var miliseconds = time - time_s;
 
-			if (time_s < 10)
+			if (time_s >= 3600) {
+				var h = (time_s / 3600) >> 0;
+				var m = ((time_s % 3600) / 60) >> 0;
+				var s = time_s % 60;
+				time_s = h + ':' + ((m<10)?'0':'') + m + ':' + (s < 10 ? '0'+s : s);
+			}
+			else if (time_s < 10)
 			{
 				if (time === 0) return '00:00:000';
 				time_s = '00:0' + time_s;
@@ -3120,7 +3126,13 @@
 			var time_s = time >> 0;
 			var miliseconds = time - time_s;
 
-			if (time_s < 10)
+			if (time_s >= 3600) {
+				var h = (time_s / 3600) >> 0;
+				var m = ((time_s % 3600) / 60) >> 0;
+				var s = time_s % 60;
+				time_s = h + ':' + ((m<10)?'0':'') + m + ':' + (s < 10 ? '0'+s : s);
+			}
+			else if (time_s < 10)
 				time_s = '00:0' + time_s;
 			else if (time_s < 60)
 				time_s = '00:' + time_s;
