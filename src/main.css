@@ -1711,3 +1711,18 @@ input,textarea{-webkit-touch-callout:none}
 
 .pk_mt_ext_btn.pk_act.pk_mt_ext_btn { background: #ff555540 !important; color: #ff5555 !important; }
 
+/* ── Icon font fallbacks (from Dance Station fork) ── */
+/* If icomoon font fails to load (subdirectory, CDN down, embed), fall back to Unicode */
+.icon-play3:before{content:"\\25B6"}
+.icon-pause2:before{content:"\\23F8"}
+.icon-stop2:before{content:"\\23F9"}
+.icon-backward2:before{content:"\\23EE"}
+.icon-forward3:before{content:"\\23ED"}
+.icon-previous2:before{content:"\\23EE"}
+.icon-next2:before{content:"\\23E9"}
+.icon-loop:before{content:"\\21BB"}
+.icon-scissors:before{content:"\\2702"}
+.icon-files-empty:before{content:"\\1F4C1"}
+.icon-file-text2:before{content:"\\1F4C4"}
+.icon-silence:before{content:"S"}
+

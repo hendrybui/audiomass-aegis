@@ -126,6 +126,25 @@
 			// ---
 		};
 
+		// --- force load: always replace, no is_ready check (from Dance Station fork) ---
+		this.ForceLoadBlob = function ( blob ) {
+			app.listenFor ('RequestCancelModal', function() {
+				wavesurfer.cancelBufferLoad ();
+				if (wavesurfer.arraybuffer) q.is_ready = true;
+				app.fireEvent ('RequestResize');
+				setTimeout(function() { app.fireEvent ('DidDownloadFile'); }, 12);
+				app.stopListeningForName ('RequestCancelModal');
+				OneUp ('Canceled Loading', 1350);
+			});
+			app.fireEvent ('RequestZoomUI', 0);
+			app.fireEvent ('WillDownloadFile');
+			q.is_ready = false;
+			wavesurfer.backend._add = 0;
+			wavesurfer.loadBlob( blob );
+			app.fireEvent ('DidUnloadFile');
+			wavesurfer.regions && wavesurfer.regions.clear();
+		};
+
 		this.LoadDB = function ( e ) {
 			var new_buffer = wavesurfer.backend.ac.createBuffer (
 					e.data.length,
