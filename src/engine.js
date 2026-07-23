@@ -664,13 +664,25 @@
 			app.fireEvent ('RequestDeselect');
 		}, 113);
 
-		// M key = Add marker at cursor
+		// M key = Add marker (upstream MrkrAdd event)
 		app.ui.KeyHandler.addSingleCallback ('KeyM', function ( e ) {
-			if (app.ui.InteractionHandler.on) return ;
-			if (/INPUT|TEXTAREA|SELECT/.test ((d.activeElement && d.activeElement.tagName) || '')) return ;
-			e.preventDefault();
-			app.fireEvent ('RequestAddMarker');
-		}, 109);
+				if (app.ui.InteractionHandler.on) return ;
+				if (/INPUT|TEXTAREA|SELECT/.test ((d.activeElement && d.activeElement.tagName) || '')) return ;
+				e.preventDefault();
+				app.fireEvent ('MrkrAdd');
+			}, 109);
+
+			// [ = previous marker, ] = next marker
+			app.ui.KeyHandler.addCallback ('KeyMrkrPrv', function ( key, map, e ) {
+				if (app.ui.InteractionHandler.on || app.ui.KeyHandler.isEditTarget(e)) return;
+				e.preventDefault();
+				app.fireEvent ('MrkrPrv', (e && e.shiftKey) ? 1 : 0);
+			}, [219]);
+			app.ui.KeyHandler.addCallback ('KeyMrkrNxt', function ( key, map, e ) {
+				if (app.ui.InteractionHandler.on || app.ui.KeyHandler.isEditTarget(e)) return;
+				e.preventDefault();
+				app.fireEvent ('MrkrNxt', (e && e.shiftKey) ? 1 : 0);
+			}, [221]);
 
 
 		app.ui.KeyHandler.addCallback ('kF12', function ( k, i, e ) {

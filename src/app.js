@@ -129,6 +129,7 @@
 			q.rec    = new q._deps.rec ( q );
 			q.fls    = new q._deps.fls ( q );
 			q.amss   = q._deps.amss ? new q._deps.amss ( q ) : null;
+			q.mrk    = q._deps.mrk ? new q._deps.mrk ( q ) : null;
 			q.multitrack = q._deps.multitrack ? new q._deps.multitrack ( q ) : null;
 			q.stems = q._deps.stems ? new q._deps.stems ( q ) : null;
 
