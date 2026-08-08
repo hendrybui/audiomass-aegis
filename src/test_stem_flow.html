@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head><title>Stem Flow Test</title></head>
+<body>
+<h2>Testing Stem Loading Integration</h2>
+<div id="results"></div>
+<script>
+(async function() {
+    const API_BASE = '/api';
+    const jobId = '432ff0991f96';
+    const results = document.getElementById('results');
+    
+    try {
+        results.innerHTML += '<p>Fetching manifest...</p>';
+        const manifestResp = await fetch(`${API_BASE}/jobs/${jobId}/manifest`);
+        const manifest = await manifestResp.json();
+        
+        results.innerHTML += `<p>Status: ${manifest.status}</p>`;
+        results.innerHTML += `<p>Available stems: ${manifest.available_stems.join(', ')}</p>`;
+        
+        results.innerHTML += '<p>Testing stem download (vocals)...</p>';
+        const stemResp = await fetch(`${API_BASE}/jobs/${jobId}/stems/vocals?format=wav`);
+        const arrayBuffer = await stemResp.arrayBuffer();
+        
+        results.innerHTML += `<p>✓ Stem file size: ${arrayBuffer.byteLength} bytes</p>`;
+        
+        results.innerHTML += '<p>Testing AudioContext decoding...</p>';
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+        
+        results.innerHTML += `<p>✓ Decoded buffer: ${audioBuffer.numberOfChannels} channels, ${audioBuffer.sampleRate} Hz, ${audioBuffer.duration.toFixed(2)} seconds</p>`;
+        
+        results.innerHTML += '<p><strong>✓ All stem loading components are working!</strong></p>';
+        
+    } catch (error) {
+        results.innerHTML += `<p>❌ Error: ${error.message}</p>`;
+    }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+name: Code Quality Check
+
+on:
+  pull_request:
+    branches: [main, production]
+
+jobs:
+  quality-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Check for anti-patterns
+        run: |
+          echo "Checking for common performance issues..."
+          
+          # Check for PyTorch threading fix
+          if ! grep -q "torch.set_num_threads(1)" backend/adapters/optimized_demucs.py; then
+            echo "❌ ERROR: PyTorch threading fix missing!"
+            exit 1
+          fi
+          
+          echo "✅ Code quality checks passed!"

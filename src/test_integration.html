@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head><title>Integration Test</title></head>
+<body>
+<h2>AudioMass Integration Test</h2>
+<div id="results"></div>
+<script>
+(async function() {
+    const results = document.getElementById('results');
+    const tests = [];
+    
+    // Test 1: Main app loads
+    tests.push({ name: 'Main App', pass: typeof PKAudioEditor !== 'undefined' });
+    
+    // Test 2: Stems module
+    tests.push({ name: 'Stems Module', pass: PKAudioEditor && typeof PKAudioEditor.stems === 'object' });
+    
+    // Test 3: Multitrack module
+    tests.push({ name: 'Multitrack Module', pass: PKAudioEditor && typeof PKAudioEditor.multitrack === 'object' });
+    
+    // Test 4: Stem separation function
+    tests.push({ name: 'Stem Separation', pass: PKAudioEditor.stems && typeof PKAudioEditor.stems.startSeparation === 'function' });
+    
+    // Test 5: Multitrack stem loading
+    tests.push({ name: 'Stem Loading', pass: PKAudioEditor.multitrack && typeof PKAudioEditor.multitrack.AddStemsFromBuffers === 'function' });
+    
+    // Test 6: Project save/load
+    tests.push({ name: 'Project Save/Load', pass: PKAudioEditor._saveProject && PKAudioEditor._loadProject });
+    
+    results.innerHTML = tests.map(t => `<p>${t.pass ? '✅' : '❌'} ${t.name}</p>`).join('');
+})();
+</script>
+<script src="app.js"></script>
+<script src="stems.js"></script>
+</body>
+</html>

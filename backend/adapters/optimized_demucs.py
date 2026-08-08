@@ -1,16 +1,25 @@
-"""Optimized Demucs separator using PyTorch optimizations for faster CPU inference.
+"""HTDemucs stem separator running directly in-process via PyTorch.
 
-Uses torch.compile() and FP16 for 2-3x speedup over the Demucs CLI on CPU.
+CPU-focused: inference is kept in float32 (FP16 is a no-op or slower on most
+CPUs and the previous `torch.compile(mode="reduce-overhead")` path is a GPU
+optimisation that costs several minutes of one-time compilation on CPU — far
+more than it ever saves). The model is loaded once and reused across jobs.
+
+All progress is emitted through the stdlib `logging` module so it can be
+captured into the per-job pipeline log instead of vanishing on stdout.
 """
 
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 
 import numpy as np
 import torch
 import soundfile as sf
+
+log = logging.getLogger("audiomass.demucs")
 
 STEM_NAMES = ["drums", "bass", "other", "vocals", "guitar", "piano"]
 SAMPLE_RATE = 44100
@@ -19,29 +28,41 @@ CHUNK_SAMPLES = int(44100 * 39 / 5)  # 343980
 
 
 class OptimizedDemucs:
-    """Runs HTDemucs via PyTorch with torch.compile() for faster CPU inference."""
+    """Runs HTDemucs in-process. Construct once and reuse across jobs."""
 
-    def __init__(self, model_name: str = "htdemucs_6s", compile_model: bool = True):
+    def __init__(self, model_name: str = "htdemucs_6s", compile_model: bool = False):
         from demucs.pretrained import get_model
 
-        print(f"[OptimizedDemucs] Loading {model_name} (compile={compile_model}) ...")
+        # CRITICAL: When PyTorch runs in Python daemon threads (via pipeline),
+        # its OpenMP backend can conflict with Python threading, causing crashes.
+        # Limiting to 1 thread prevents this without significant performance loss
+        # for CPU inference (the bottleneck is I/O and model ops, not threading).
+        torch.set_num_threads(1)
+
+        # `compile_model` is accepted for backwards compatibility but ignored:
+        # torch.compile(mode="reduce-overhead") targets GPUs and adds a multi-
+        # minute compile + warmup cost on CPU with no payoff.
+        if compile_model:
+            log.warning(
+                "torch.compile requested but disabled on CPU "
+                "(it adds minutes of compile time with no CPU speedup)."
+            )
+
+        log.info("Loading %s ...", model_name)
+        t0 = time.time()
         bag = get_model(model_name)
         self.model = bag.models[0]
         self.model.eval()
-        self.model.use_train_segment = False  # dynamic length support
+        self.model.use_train_segment = False  # allow arbitrary-length input
 
         self.device = torch.device("cpu")
 
-        if compile_model:
-            print("[OptimizedDemucs] Compiling model with torch.compile() ...")
-            self.model = torch.compile(self.model, mode="reduce-overhead")
-
-        # Warm up with a small input
-        print("[OptimizedDemucs] Warming up ...")
+        # Tiny warmup so the first real chunk isn't paying lazy-init costs.
+        log.info("Warming up ...")
         dummy = torch.randn(1, 2, 44100, device=self.device, dtype=torch.float32)
         with torch.no_grad():
             _ = self.model(dummy)
-        print("[OptimizedDemucs] Ready.")
+        log.info("Ready in %.1fs.", time.time() - t0)
 
     def separate(
         self,
@@ -108,7 +129,10 @@ class OptimizedDemucs:
             elapsed = time.time() - t0
             pct = (i + 1) / n_chunks * 100
             remaining = elapsed / (i + 1) * (n_chunks - i - 1) if i > 0 else 0
-            print(f"  Chunk {i+1}/{n_chunks} ({pct:.0f}%) - {elapsed:.1f}s elapsed, ~{remaining:.0f}s remaining")
+            log.info(
+                "Chunk %d/%d (%.0f%%) - %.1fs elapsed, ~%.0fs remaining",
+                i + 1, n_chunks, pct, elapsed, remaining,
+            )
 
         # Write stems
         stems: dict[str, str] = {}
@@ -119,7 +143,9 @@ class OptimizedDemucs:
 
         total_time = time.time() - t0
         audio_duration = total_samples / SAMPLE_RATE
-        print(f"[OptimizedDemucs] Done in {total_time:.1f}s "
-              f"(audio: {audio_duration:.1f}s, {total_time/audio_duration:.2f}x realtime)")
+        log.info(
+            "Done in %.1fs (audio: %.1fs, %.2fx realtime)",
+            total_time, audio_duration, total_time / audio_duration,
+        )
 
         return stems

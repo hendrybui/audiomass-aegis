@@ -1,0 +1,30 @@
+name: Performance Check
+
+on:
+  pull_request:
+    branches: [main, production]
+    
+jobs:
+  performance-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Check for sequential loading loops
+        run: |
+          echo "Checking for anti-patterns that cause slow loading..."
+          
+          # Check for sequential for loops with fetch
+          if grep -q "for.*fetch.*await" src/app.js src/stems.js; then
+            echo "❌ ERROR: Sequential fetch detected! This causes slow loading."
+            exit 1
+          fi
+          
+          # Check for Promise.all usage in loading functions
+          if ! grep -q "Promise.all" src/app.js; then
+            echo "❌ ERROR: Missing Promise.all for concurrent operations!"
+            exit 1  
+          fi
+          
+          echo "✅ Performance checks passed!"

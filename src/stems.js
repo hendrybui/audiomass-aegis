@@ -3,10 +3,74 @@
 
 	function PKStems ( app ) {
 		var q = this;
-		var API_BASE = '/api';
+
+		// Compute the API base relative to where this page is served from.
+		// When AudioMass is reached directly (localhost:5055/) the base is '/api'.
+		// When it's behind a path-prefixed reverse proxy (e.g. Caddy serving it
+		// at /mass/ or /audiomass/), the base must include that prefix, otherwise
+		// '/api/...' resolves to the proxy root and silently misses the backend.
+		function detectApiBase () {
+			var prefixMatch = d.location.pathname.match(/^(\/[a-z0-9_-]+)\//i);
+			var prefix = prefixMatch ? prefixMatch[1] : '';
+			return prefix + '/api';
+		}
+
+		var API_BASE = detectApiBase();
 		var separating = false;
 		var current_job_id = null;
 		var event_source = null;
+
+		// ---- Stem Settings ----
+		var stemSettings = {
+			selectedStems: ['vocals', 'drums', 'bass', 'other'],
+			apiEndpoint: API_BASE,
+			outputFormat: 'wav'
+		};
+
+		// Load settings from localStorage if available. NOTE: we intentionally do
+		// NOT restore a previously-saved apiEndpoint here — it was often a stale
+		// '/api' captured under direct access, which then breaks when the app is
+		// later opened behind a proxy prefix. The auto-detected value above is
+		// always correct for the current access path.
+		var savedSettings = w.localStorage.getItem('audiomass_stem_settings');
+		if (savedSettings) {
+			try {
+				var parsed = JSON.parse(savedSettings);
+				// Guard against corrupted entries: only accept arrays/strings of
+				// the right shape, otherwise we'd store a non-array into
+				// selectedStems and crash later inside the Save callback loop.
+				if (parsed && Array.isArray(parsed.selectedStems)) {
+					stemSettings.selectedStems = parsed.selectedStems;
+				}
+				if (parsed && typeof parsed.outputFormat === 'string') {
+					stemSettings.outputFormat = parsed.outputFormat;
+				}
+			} catch (e) {
+				console.warn('Failed to load stem settings:', e);
+			}
+		}
+
+		function saveStemSettings() {
+			try {
+				w.localStorage.setItem('audiomass_stem_settings', JSON.stringify(stemSettings));
+			} catch (e) {
+				console.warn('Failed to save stem settings:', e);
+			}
+		}
+
+		q.getStemSettings = function() {
+			return stemSettings;
+		};
+
+		q.setStemSettings = function(newSettings) {
+			if (newSettings.selectedStems) stemSettings.selectedStems = newSettings.selectedStems;
+			if (newSettings.apiEndpoint) {
+				stemSettings.apiEndpoint = newSettings.apiEndpoint;
+				API_BASE = newSettings.apiEndpoint;
+			}
+			if (newSettings.outputFormat) stemSettings.outputFormat = newSettings.outputFormat;
+			saveStemSettings();
+		};
 
 		// ---- WAV encoding (reuse AudioMass wav.js helpers) ----
 		function floatTo16BitPCM ( output, offset, input ) {
@@ -70,7 +134,8 @@
 
 		// ---- Get audio from editor ----
 		function getAudioBuffer () {
-			// try multitrack selected clip first
+			// Try multitrack selected clip first
+		console.log('[Stem Separation] Checking multitrack for audio...');
 			var mt = app.multitrack;
 			if ( mt && mt.IsOn && mt.IsOn() ) {
 				var state = mt.getState && mt.getState();
@@ -81,7 +146,8 @@
 				}
 			}
 
-			// single-track editor
+			// Check single-track editor
+		console.log('[Stem Separation] Checking single-track editor for audio...');
 			var wv = app.engine && app.engine.wavesurfer;
 			if ( wv && wv.backend && wv.backend.buffer ) {
 				return wv.backend.buffer;
@@ -152,6 +218,18 @@
 		function streamProgress ( jobId ) {
 			event_source = new EventSource( API_BASE + '/jobs/' + jobId + '/events' );
 
+			event_source.addEventListener( 'job_state', function ( e ) {
+				try {
+					var data = JSON.parse( e.data );
+					if ( data.status === 'done' ) {
+						// Job already completed - load stems immediately
+						closeSSE();
+						updateProgress( 100, 'Loading stems...' );
+						loadStems( current_job_id );
+					}
+				} catch ( err ) {}
+			});
+
 			event_source.addEventListener( 'job_progress', function ( e ) {
 				try {
 					var data = JSON.parse( e.data );
@@ -183,7 +261,7 @@
 				separating = false;
 				hideProgressModal();
 				var msg = 'Separation failed';
-				try { var errData = JSON.parse(e.data); msg = errData.message || errData.error || msg; } catch(err){}
+				try { var errData = JSON.parse(e.data); msg = errData.message || errData.error || errData.detail || msg; } catch(err){}
 				OneUp && OneUp( msg, 3000 );
 			});
 
@@ -302,6 +380,7 @@
 
 			var formData = new FormData();
 			formData.append( 'file', wavBlob, 'audio.wav' );
+			formData.append( 'stems', JSON.stringify(stemSettings.selectedStems) );
 
 			fetch( API_BASE + '/jobs/upload', {
 				method: 'POST',
@@ -324,6 +403,92 @@
 		};
 
 		q.isSeparating = function () { return separating; };
+
+		// ---- Show Settings Modal ----
+		q.showSettingsModal = function () {
+			var availableStems = ['vocals', 'drums', 'bass', 'guitar', 'piano', 'other'];
+			var stemLabels = {
+				'vocals': 'Vocals',
+				'drums': 'Drums',
+				'bass': 'Bass',
+				'guitar': 'Guitar',
+				'piano': 'Piano',
+				'other': 'Other'
+			};
+
+			var bodyHtml = '<div style="padding:8px">' +
+				'<p style="margin:0 0 12px 0;color:#aaa;font-size:13px">Select which stems to extract from audio:</p>';
+
+			availableStems.forEach(function (stem) {
+				var checked = stemSettings.selectedStems.indexOf(stem) >= 0 ? 'checked' : '';
+				bodyHtml += '<div class="pk_row" style="margin-bottom:8px">' +
+					'<input type="checkbox" class="pk_check pk_stem_check" id="stem_' + stem + '" value="' + stem + '" ' + checked + '>' +
+					'<label for="stem_' + stem + '" style="margin-left:8px">' + stemLabels[stem] + '</label>' +
+					'</div>';
+			});
+
+			bodyHtml += '</div>' +
+				'<div class="pk_row" style="margin-top:16px;padding-top:16px;border-top:1px solid #444">' +
+				'<label for="stem_api">API Endpoint:</label>' +
+				'<input type="text" id="stem_api" class="pk_txt" style="min-width:200px;margin-left:8px" value="' + API_BASE + '" readonly style="opacity:0.7">' +
+				'<small style="display:block;margin-left:8px;color:#888;font-size:11px">Auto-detected from current URL (no manual override needed)</small>' +
+				'</div>' +
+				'<div class="pk_row" style="margin-top:8px">' +
+				'<label for="stem_format">Output Format:</label>' +
+				'<select id="stem_format" class="pk_txt" style="min-width:100px;margin-left:8px">' +
+				'<option value="wav" ' + (stemSettings.outputFormat === 'wav' ? 'selected' : '') + '>WAV</option>' +
+				'<option value="mp3" ' + (stemSettings.outputFormat === 'mp3' ? 'selected' : '') + '>MP3</option>' +
+				'<option value="flac" ' + (stemSettings.outputFormat === 'flac' ? 'selected' : '') + '>FLAC</option>' +
+				'</select>' +
+				'</div>';
+
+			new PKSimpleModal({
+				title: 'Stem Separation Settings',
+				ondestroy: function () {
+					PKAudioEditor.ui.InteractionHandler.on = false;
+					PKAudioEditor.ui.KeyHandler.removeCallback('stemSettingsModal');
+				},
+				buttons: [
+					{
+						title: 'Save',
+						clss: 'pk_modal_a_accpt',
+						callback: function ( modal ) {
+							var checkboxes = modal.el_body.getElementsByClassName('pk_stem_check');
+							var newSelectedStems = [];
+							for (var i = 0; i < checkboxes.length; i++) {
+								if (checkboxes[i].checked) {
+									newSelectedStems.push(checkboxes[i].value);
+								}
+							}
+							var newFormat = modal.el_body.querySelector('#stem_format').value;
+
+							q.setStemSettings({
+								selectedStems: newSelectedStems.length > 0 ? newSelectedStems : ['vocals', 'drums', 'bass', 'other'],
+								outputFormat: newFormat
+							});
+
+							OneUp && OneUp('Settings saved. Starting separation...', 1500);
+							modal.Destroy();
+							q.startSeparation();
+						}
+					},
+					{
+						title: 'Cancel',
+						callback: function ( modal ) {
+							modal.Destroy();
+						}
+					}
+				],
+				body: bodyHtml,
+				setup: function ( modal ) {
+					PKAudioEditor.fireEvent('RequestPause');
+					PKAudioEditor.ui.InteractionHandler.checkAndSet('modal');
+					PKAudioEditor.ui.KeyHandler.addCallback('stemSettingsModal', function ( e ) {
+						modal.Destroy();
+					}, [27]);
+				}
+			}).Show();
+		};
 	}
 
 	PKAE._deps.stems = PKStems;

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Sequence
 
@@ -13,7 +15,23 @@ class ExternalToolError(RuntimeError):
 
 
 def find_command_path(command: str) -> str | None:
-    return shutil.which(command)
+    # First, check PATH (system-installed tools).
+    found = shutil.which(command)
+    if found:
+        return found
+
+    # Fallback: tools installed in the venv's `bin/` directory. When the
+    # backend runs under a virtualenv, uvicorn doesn't put .venv/bin on
+    # PATH, and sys.executable may resolve through a symlink to the
+    # system Python (so its parent dir is /usr/bin, not the venv).
+    # sys.prefix is the reliable signal: it always points at the venv
+    # root while the venv is active.
+    venv_bin = Path(sys.prefix) / 'bin'
+    candidate = venv_bin / command
+    if candidate.exists() and os.access(candidate, os.X_OK):
+        return str(candidate)
+
+    return None
 
 
 def require_command(command: str) -> str:

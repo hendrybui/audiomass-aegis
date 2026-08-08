@@ -327,62 +327,42 @@
 				var loaded = 0;
 				var total = clipIds.length;
 				var clipBuffers = {};
+				var actx = new (w.AudioContext || w.webkitAudioContext) ();
 
-					var actx = new (w.AudioContext || w.webkitAudioContext) ();
-
-					// Load all clips in parallel for MUCH faster loading
-					var total = clipIds.length;
-					var clipBuffers = {};
-					var loaded = 0;
-
-					if (total === 0) {
-						alert ("Project has no audio clips.");
-						return;
-					}
-
-					toast.textContent = "Loading clips... 0/" + total + " (parallel - much faster!)";
-
-					// Load all clips simultaneously instead of one by one
-					var loadPromises = clipIds.map (function (cid) {
-						var url = q._getApiBase () + "/projects/" + projectId + "/clips/" + cid;
-						return fetch (url).then (function (r) {
+				for (var i = 0; i < clipIds.length; i++) {
+					(function (cid) {
+						var url = q._getApiBase () + '/projects/' + projectId + '/clips/' + cid;
+						fetch (url).then (function (r) {
 							return r.arrayBuffer ();
 						}).then (function (ab) {
 							return actx.decodeAudioData (ab);
 						}).then (function (buffer) {
 							clipBuffers[cid] = buffer;
 							loaded++;
-							toast.textContent = "Loading clips... " + loaded + "/" + total;
-							return buffer;
+							toast.textContent = 'Loading clips... ' + loaded + '/' + total;
+							if (loaded === total) {
+								// all clips loaded — restore state
+								for (var c = 0; c < state.clips.length; c++) {
+									state.clips[c].buffer = clipBuffers[state.clips[c].id] || null;
+								}
+								// make sure multitrack is active
+								if (!q.multitrack || !q.multitrack.Toggle) return;
+								q.multitrack.Toggle (true);
+								// restore state
+								if (q.multitrack.RestoreProjectState) {
+									q.multitrack.RestoreProjectState (state);
+								}
+								if (actx.close) actx.close ();
+								toast.textContent = 'Project loaded!';
+								setTimeout (function () { toast.remove (); }, 2000);
+							}
 						}).catch (function (err) {
-							console.error ("Failed to load clip " + cid + ":", err);
+							console.error ('Failed to load clip ' + cid + ':', err);
 							loaded++;
-							toast.textContent = "Loading clips... " + loaded + "/" + total;
-							return null;
+							if (loaded === total && toast.parentNode) toast.remove ();
 						});
-					});
-
-					Promise.all (loadPromises).then (function () {
-						// all clips loaded — restore state
-						for (var c = 0; c < state.clips.length; c++) {
-							state.clips[c].buffer = clipBuffers[state.clips[c].id] || null;
-						}
-						// make sure multitrack is active
-						if (!q.multitrack || !q.multitrack.Toggle) return;
-						q.multitrack.Toggle (true);
-						// restore state
-						if (q.multitrack.RestoreProjectState) {
-							q.multitrack.RestoreProjectState (state);
-						}
-						if (actx.close) actx.close ();
-						toast.textContent = "Project loaded!";
-						setTimeout (function () { toast.remove (); }, 2000);
-					}).catch (function (err) {
-						toast.textContent = "Error loading project!";
-						setTimeout (function () { toast.remove (); }, 3000);
-						console.error ("Project load error:", err);
-					});
-
+					})(clipIds[i]);
+				}
 			}).catch (function (err) {
 				alert ('Failed to load project: ' + err.message);
 			});

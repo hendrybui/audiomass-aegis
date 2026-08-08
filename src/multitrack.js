@@ -122,6 +122,7 @@
 		var beat_raf = 0;
 		var empty_el = null;
 		var btn_toggle = null;
+		var btn_mixer = null;
 		var beat_bar = null;
 		var btn_beat = null;
 		var btn_snap = null;
@@ -692,6 +693,7 @@
 			tracks_wrap.addEventListener ('scroll', syncTrackScroll, false);
 
 			attachToolbarButton ();
+			attachMixerButton ();
 			attachBeatToolbar ();
 			render ();
 		}
@@ -747,6 +749,56 @@
 			};
 			actions.appendChild ( btn_toggle );
 
+		}
+
+		function attachMixerButton () {
+			var actions = app.el.getElementsByClassName ('pk_hdr')[0];
+			if (!actions) {
+				setTimeout(attachMixerButton, 100);
+				return;
+			}
+			if (btn_mixer) return ;
+
+			btn_mixer = d.createElement ('button');
+			btn_mixer.setAttribute ('tabIndex', -1);
+			btn_mixer.className = 'pk_mt_topbtn pk_mt_mixer';
+			btn_mixer.textContent = 'Mixer';
+			btn_mixer.title = 'Toggle Multitrack Mixer (M)';
+			btn_mixer.onclick = function () {
+				var mt = app.multitrack;
+				if (mt && mt.IsOn && !mt.IsOn ()) {
+					mt.Toggle (true);
+				}
+				app.fireEvent ('RequestMixerToggle');
+				this.blur ();
+			};
+			actions.appendChild ( btn_mixer );
+
+			// Update button state when mixer toggles
+			app.listenFor ('DidToggleFreqAn', function ( url, val ) {
+				if (url !== 'mix') return ;
+				if (btn_mixer) {
+					if (val) {
+						btn_mixer.classList.add ('pk_act');
+						btn_mixer.textContent = 'Mixer ✓';
+					} else {
+						btn_mixer.classList.remove ('pk_act');
+						btn_mixer.textContent = 'Mixer';
+					}
+				}
+			});
+
+			// Keyboard shortcut: M key to toggle mixer (when multitrack is active)
+			var mixerKeyHandler = function ( e ) {
+				if (e.key === 'm' || e.key === 'M') {
+					var mt = app.multitrack;
+					if (mt && mt.IsOn && mt.IsOn ()) {
+						e.preventDefault ();
+						app.fireEvent ('RequestMixerToggle');
+					}
+				}
+			};
+			w.addEventListener ('keydown', mixerKeyHandler);
 		}
 
 		function attachBeatToolbar () {
@@ -870,38 +922,43 @@
 		}
 
 		function Toggle ( force ) {
-			on = force === undefined ? !IsOn () : !!force;
-			app.el.classList[on ? 'add' : 'remove'] ('pk_mt_on');
-			if (btn_toggle) btn_toggle.classList[on ? 'add' : 'remove'] ('pk_act');
+		on = force === undefined ? !IsOn () : !!force;
+		app.el.classList[on ? 'add' : 'remove'] ('pk_mt_on');
+		if (btn_toggle) btn_toggle.classList[on ? 'add' : 'remove'] ('pk_act');
 
-			if (!on) {
-				cancelRender ();
-				if (beat_raf) {
-					w.cancelAnimationFrame ( beat_raf );
-					beat_raf = 0;
-				}
-				closeBpmRange ();
-				cancelActiveDrag ();
-				stopFxPreview ( true );
-				Stop ();
-				HideMixer ();
-				emitEditorState ();
-			}
-			else {
-				syncEditingClip ();
-				app.engine.wavesurfer.pause ();
-				if (!did_init_zoom) {
-					did_init_zoom = true;
-					resetHorizontalZoom ();
-				}
-				main.scrollTop = 0;
-				tracks_wrap.scrollTop = 0;
-				render ();
-				emitState ();
-			}
-			if (on) app.fireEvent ('RequestResize');
-			else refreshEditorView ();
+		// Attach mixer button on first toggle on
+		if (on && !btn_mixer) {
+			attachMixerButton ();
 		}
+
+		if (!on) {
+			cancelRender ();
+			if (beat_raf) {
+				w.cancelAnimationFrame ( beat_raf );
+				beat_raf = 0;
+			}
+			closeBpmRange ();
+			cancelActiveDrag ();
+			stopFxPreview ( true );
+			Stop ();
+			HideMixer ();
+			emitEditorState ();
+		}
+		else {
+			syncEditingClip ();
+			app.engine.wavesurfer.pause ();
+			if (!did_init_zoom) {
+				did_init_zoom = true;
+				resetHorizontalZoom ();
+			}
+			main.scrollTop = 0;
+			tracks_wrap.scrollTop = 0;
+			render ();
+			emitState ();
+		}
+		if (on) app.fireEvent ('RequestResize');
+		else refreshEditorView ();
+	}
 
 		function syncScroll () {
 			if (!main) return ;
@@ -5928,7 +5985,6 @@
 		q.RecordStart = RecordStart;
 		q.RecordStop = RecordStop;
 		q.ToggleMixer = ToggleMixer;
-		q.DownloadAllStems = DownloadAllStems;
 		q.GetState = function () { return cloneState (); };
 		q.RestoreProjectState = function (state) { restoreState (state); };
 

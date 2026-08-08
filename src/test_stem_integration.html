@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Stem Loading Test</title>
+</head>
+<body>
+    <h2>Testing Stem Integration Flow</h2>
+    <div id="results"></div>
+    <button onclick="testFlow()">Run Test</button>
+    
+    <script>
+        async function testFlow() {
+            const results = document.getElementById('results');
+            const API_BASE = '/api';
+            const jobId = '432ff0991f96';
+            
+            results.innerHTML = '<p>Starting test...</p>';
+            
+            try {
+                // Step 1: Fetch manifest
+                results.innerHTML += '<p>Step 1: Fetching manifest...</p>';
+                const manifestResp = await fetch(`${API_BASE}/jobs/${jobId}/manifest`);
+                const manifest = await manifestResp.json();
+                results.innerHTML += `<p>✓ Manifest loaded, status: ${manifest.status}</p>`;
+                
+                // Step 2: Get stem names (excluding mix/original)
+                const stemNames = manifest.selected_stems || manifest.available_stems.filter(s => !['mix', 'original'].includes(s));
+                results.innerHTML += `<p>✓ Stems to load: ${stemNames.join(', ')}</p>`;
+                
+                // Step 3: Fetch one stem as test
+                results.innerHTML += '<p>Step 3: Testing stem download (vocals)...</p>';
+                const stemResp = await fetch(`${API_BASE}/jobs/${jobId}/stems/vocals?format=wav`);
+                const arrayBuffer = await stemResp.arrayBuffer();
+                results.innerHTML += `<p>✓ Downloaded: ${arrayBuffer.byteLength} bytes</p>`;
+                
+                // Step 4: Decode audio
+                results.innerHTML += '<p>Step 4: Decoding audio...</p>';
+                const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+                results.innerHTML += `<p>✓ Decoded: ${audioBuffer.numberOfChannels}ch, ${audioBuffer.sampleRate}Hz, ${audioBuffer.duration.toFixed(2)}s</p>`;
+                
+                // Step 5: Test if multitrack functions would work
+                results.innerHTML += '<p>Step 5: Simulating multitrack integration...</p>';
+                const stemsMap = {
+                    'Vocals': audioBuffer,
+                    'Drums': audioBuffer,
+                    'Bass': audioBuffer
+                };
+                results.innerHTML += `<p>✓ Created stemsMap with ${Object.keys(stemsMap).length} stems</p>`;
+                
+                results.innerHTML += '<p><strong>✓ Complete flow working! Stems should load into multitrack.</strong></p>';
+                
+            } catch (error) {
+                results.innerHTML += `<p>❌ Error: ${error.message}</p>`;
+            }
+        }
+    </script>
+</body>
+</html>

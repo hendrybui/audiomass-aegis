@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import logging
 import shutil
 from pathlib import Path
-from threading import Thread
+from threading import Lock, Thread
 
 from adapters.demucs_adapter import DemucsAdapter
 from adapters.ffmpeg_adapter import FFmpegAdapter
@@ -15,6 +16,8 @@ from services.cancellation_service import cancellation_service
 from services.device_service import DeviceService
 from services.waveform_service import WaveformService
 from storage.job_store import JobStore
+
+log = logging.getLogger("audiomass.pipeline")
 
 
 class PipelineService:
@@ -29,6 +32,10 @@ class PipelineService:
         self.device_service = DeviceService()
         self.analysis_service = AnalysisService()
         self.waveform_service = WaveformService()
+        # The PyTorch separator is expensive to build (model load + warmup), so
+        # it is constructed lazily on first use and then reused across jobs.
+        self._separator: OptimizedDemucs | None = None
+        self._separator_lock = Lock()
 
     def start(self, job_id: str) -> None:
         Thread(target=self.run, args=(job_id,), daemon=True).start()
@@ -36,6 +43,7 @@ class PipelineService:
     def run(self, job_id: str) -> None:
         job_dir = self.job_store.ensure_job_dir(job_id)
         log_path = job_dir / 'logs' / 'pipeline.log'
+        handler = self._attach_log_handler(log_path)
         try:
             manifest = self.job_service.get_manifest(job_id)
             if manifest is None:
@@ -97,7 +105,32 @@ class PipelineService:
             self._cleanup_partial_outputs(job_dir)
             self.job_service.mark_failed(job_id, self._friendly_error_message(exc))
         finally:
+            self._detach_log_handler(handler)
             cancellation_service.clear(job_id)
+
+    def _attach_log_handler(self, log_path: Path) -> logging.Handler:
+        """Route `audiomass.*` logger output into the per-job pipeline log.
+
+        Without this the separator's progress messages only go to stdout and
+        never reach pipeline.log, so the separation phase looks silent/hung.
+        """
+        append_log(log_path, '')  # ensure file exists
+        handler = logging.FileHandler(log_path, encoding='utf-8')
+        handler.setFormatter(logging.Formatter('%(message)s'))
+        handler.setLevel(logging.INFO)
+        logger = logging.getLogger('audiomass')
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        return handler
+
+    def _detach_log_handler(self, handler: logging.Handler | None) -> None:
+        if handler is None:
+            return
+        logging.getLogger('audiomass').removeHandler(handler)
+        try:
+            handler.close()
+        except Exception:
+            pass
 
     def _prepare_source(self, job_id: str, source_type: str, url: str | None, filename: str | None, job_dir: Path, log_path: Path) -> Path:
         self.job_service.update_job(job_id, status=JobStatus.ingesting_source, progress=0.12, step=JobStatus.ingesting_source.value, message='Preparing source media')
@@ -115,15 +148,29 @@ class PipelineService:
             raise RuntimeError('URL-based job missing source URL')
         return Path(self.yt_dlp.download(url, str(source_dir), job_id=job_id, log_path=log_path))
 
+    def _get_separator(self) -> OptimizedDemucs:
+        """Lazily build and cache the PyTorch separator.
+
+        Building it loads the model weights and runs a warmup pass, which takes
+        long enough that doing it per-job dominated wall-clock time. Caching it
+        means only the first job pays that cost.
+        """
+        if self._separator is None:
+            with self._separator_lock:
+                if self._separator is None:
+                    self._separator = OptimizedDemucs()
+        return self._separator
+
     def _separate_or_fallback(self, job_id: str, canonical_wav: Path, selected_stems: list[str], job_dir: Path, log_path: Path) -> dict[str, str]:
         raw_dir = job_dir / 'stems_raw'
         final_dir = job_dir / 'stems'
         raw_stems: dict[str, str] = {}
 
-        # Try optimized PyTorch separator first (torch.compile + FP16, 2-3x faster)
+        # In-process PyTorch separator (float32, no torch.compile on CPU).
+        # NOTE: CancelledError must propagate — it is NOT a separator failure.
         try:
-            append_log(log_path, 'Using optimized Demucs (torch.compile + FP16)')
-            separator = OptimizedDemucs(compile_model=True)
+            append_log(log_path, 'Separating stems with HTDemucs (PyTorch, CPU)')
+            separator = self._get_separator()
             raw_stems = separator.separate(
                 str(canonical_wav), str(final_dir),
                 progress_callback=lambda done, total: self._separation_progress(job_id, done, total),
@@ -133,8 +180,11 @@ class PipelineService:
                 target = final_dir / f'{stem}.wav'
                 outputs[stem] = str(target) if target.exists() else ''
             return outputs
+        except CancelledError:
+            # User cancelled — never fall back, just stop.
+            raise
         except Exception as exc:
-            append_log(log_path, f'Optimized separator failed, falling back to Demucs CLI: {exc}')
+            append_log(log_path, f'PyTorch separator failed, falling back to Demucs CLI: {exc}')
             raw_stems = {}
 
         # Fallback: Demucs CLI
@@ -166,12 +216,16 @@ class PipelineService:
             raise CancelledError()
 
     def _cleanup_partial_outputs(self, job_dir: Path) -> None:
-        for folder_name in ['stems', 'stems_raw', 'analysis', 'waveforms']:
+        # Only purge transient/intermediate artefacts. The `stems` directory is
+        # intentionally left intact: separation is the expensive step and may
+        # have already completed when a cancel/failed event arrives. Wiping it
+        # destroys finished work and leaves the manifest pointing at files that
+        # no longer exist. Stale entries there are harmless; delete_job cleans
+        # the whole job dir when the user removes the job.
+        for folder_name in ['stems_raw', 'analysis', 'waveforms']:
             target = job_dir / folder_name
             if target.exists():
                 shutil.rmtree(target, ignore_errors=True)
-            if folder_name != 'stems_raw':
-                target.mkdir(parents=True, exist_ok=True)
 
     def _friendly_error_message(self, exc: Exception) -> str:
         message = str(exc)

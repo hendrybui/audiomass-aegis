@@ -37,8 +37,16 @@ setup() {
 }
 
 start() {
-    echo "=== Starting AudioMass + Splinter-X on port $PORT ==="
-    "$VENV_DIR/bin/uvicorn" app:app --host 0.0.0.0 --port "$PORT" --app-dir backend "${@}"
+    echo "=== Starting AudioMass (plain stdlib server + HTDemucs stems, no FastAPI) on port $PORT ==="
+    # Resolve venv python to an ABSOLUTE path before cd src — run.sh runs from
+    # the project root, but the server itself runs from src/.
+    PY="$(cd "$(dirname "$0")" && pwd)/$VENV_DIR/bin/python"
+    if [ ! -x "$PY" ]; then
+        echo "venv python not found at $PY — falling back to system python3 (stems will NOT work without torch/demucs)" >&2
+        PY="python3"
+    fi
+    cd src
+    exec "$PY" audiomass-server.py
 }
 
 case "${1:-start}" in

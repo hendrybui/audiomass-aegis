@@ -32,6 +32,11 @@ setTimeout(function () {
 				'AudioMass is a free, open source, web-based Audio and Waveform Editor.<br />It runs entirely in the browser with no backend and no plugins required!'+
 				'<br/><br/><br/>'+
 				body_str+
+					'<div style="background:rgba(233, 69, 96, 0.2); border:1px solid #e94560; border-radius:8px; padding:16px; margin:16px 0;">'+
+					'<strong style="color:#e94560;">🎵 New: AI Stem Separation!</strong><br/>'+
+					'Separate vocals, drums, bass, and other instruments from any audio file. '+
+					'<a href="stems.html" style="color:#e94560; font-weight:bold; text-decoration:underline;">Try it now →</a>'+
+					'</div>'+
 				'You can load any type of audio your browser supports and perform operations such as fade in, cut, trim, change the volume, '+
 				'and apply a plethora of audio effects.<br/><br/>'+
 				body_str2+
