@@ -5,7 +5,7 @@ import zipfile
 from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from domain.enums import SourceType
@@ -67,6 +67,20 @@ async def create_upload_job(file: UploadFile = File(...), stems: str = Form('["v
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ActiveJobConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get('/jobs/active', response_model=JobSnapshot)
+async def get_active_job() -> JobSnapshot | JSONResponse:
+    """The in-flight job, if any. Must be declared before '/jobs/{job_id}'
+    so 'active' isn't captured as a job id. Lets the frontend resume the
+    progress modal after a page reload."""
+    snapshot = job_service.get_active_job()
+    if snapshot is None:
+        # 200, not 404: "no active job" is the normal idle state, and the
+        # Aether bridge polls this every 2s — a 404 would log a console
+        # error on every poll.
+        return JSONResponse(content={'active': False})
+    return snapshot
 
 
 @router.get('/jobs/{job_id}', response_model=JobSnapshot)

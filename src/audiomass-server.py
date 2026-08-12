@@ -39,12 +39,14 @@ sys.path.insert(0, str(BACKEND_DIR))
 
 from domain.enums import SourceType                  # noqa: E402
 from domain.models import CreateJobRequest           # noqa: E402
+from plugins import PluginContext, PluginError, plugin_registry  # noqa: E402
 from services.event_bus import event_bus             # noqa: E402
 from services.job_service import (                   # noqa: E402
     ActiveJobConflictError,
     job_service,
 )
 from services import project_service                # noqa: E402
+from services.tooling_service import tooling_service  # noqa: E402
 from utils.paths import JOBS_DIR                     # noqa: E402
 from utils.validation import (                       # noqa: E402
     ValidationError,
@@ -54,9 +56,6 @@ from utils.validation import (                       # noqa: E402
 
 PORT = int(os.environ.get("AUDIOMASS_PORT", "5055"))
 HOST = "0.0.0.0"
-
-# Pitch class names (used by /api/transcribe for human-readable note names).
-NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
 # Extension -> MIME for static serving (SimpleHTTPRequestHandler covers most,
 # but we pin .wasm so the wasm modules load correctly).
@@ -275,6 +274,13 @@ class AudioMassHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"status": "ok"})
             return
 
+        # /api/diagnostics -> tooling + separation backend status. The Aether
+        # bridge reads this to show which engine is active (ROCm container vs
+        # CPU worker) and the measured per-job overhead.
+        if path == "/api/diagnostics":
+            self._send_json(200, tooling_service.diagnostics().model_dump())
+            return
+
         # /api/jobs/{id}/events  -> SSE
         m = re.fullmatch(r"/api/jobs/([A-Za-z0-9_-]+)/events", path)
         if m:
@@ -295,6 +301,22 @@ class AudioMassHandler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/jobs/([A-Za-z0-9_-]+)/stems/([A-Za-z0-9_-]+)", path)
         if m:
             self.handle_get_stem(m.group(1), m.group(2), qs.get("format", ["wav"])[0])
+            return
+
+        # /api/jobs/active  -> the in-flight job, if any. Must be matched
+        # BEFORE the /api/jobs/{id} pattern below ("active" would otherwise
+        # be captured as a job id). Lets the frontend resume the progress
+        # modal after a page reload instead of losing track of a running
+        # separation.
+        if path == "/api/jobs/active":
+            active = job_service.get_active_job()
+            if active is None:
+                # 200, not 404: "no active job" is the normal idle state, and
+                # the Aether bridge polls this every 2s — a 404 would log a
+                # console error on every poll.
+                self._send_json(200, b'{"active": false}')
+            else:
+                self._send_json(200, _json_snapshot(active).encode("utf-8"))
             return
 
         # /api/jobs/{id}  -> snapshot
@@ -525,32 +547,21 @@ class AudioMassHandler(BaseHTTPRequestHandler):
             tmp.close()
 
             try:
-                # Deferred import: torch/ONNX are slow and only needed here.
-                from basic_pitch.inference import predict
-            except Exception as exc:  # noqa: BLE001
-                self._send_error_json(500, f"basic-pitch not available: {exc}")
+                # The capability (basic-pitch inference + note mapping) lives
+                # in the 'transcribe' plugin; the endpoint only handles the
+                # HTTP boundary.
+                plugin = plugin_registry.require("transcribe")
+                result = plugin.run(PluginContext(
+                    params={"input_path": tmp.name},
+                    work_dir=Path(tempfile.gettempdir()),
+                ))
+            except PluginError as exc:
+                self._send_error_json(500, str(exc))
                 return
-
-            try:
-                _, midi_data, note_events = predict(tmp.name)
             except Exception as exc:  # noqa: BLE001
                 self._send_error_json(500, f"Transcription failed: {exc}")
                 return
-
-            notes = []
-            for start, end, midi_num, amplitude, _bends in note_events:
-                name = NOTE_NAMES[((midi_num % 12) + 12) % 12]
-                octave = midi_num // 12 - 1
-                notes.append({
-                    "start": round(float(start), 3),
-                    "duration": round(float(end - start), 3),
-                    "midi": int(midi_num),
-                    "pitch": f"{name}{octave}",
-                    "amplitude": round(float(amplitude), 3),
-                })
-            # Sort by start time for predictable rendering.
-            notes.sort(key=lambda n: n["start"])
-            self._send_json(200, {"notes": notes, "count": len(notes)})
+            self._send_json(200, result)
         finally:
             try:
                 os.unlink(tmp.name)
@@ -691,6 +702,16 @@ class AudioMassHandler(BaseHTTPRequestHandler):
 def main():
     # Make sure the jobs root exists (JobStore does this too, but be defensive).
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Jobs left mid-flight by a previous server process (crash, OOM kill,
+    # restart) can never finish — their pipeline thread is gone. Mark them
+    # failed so they don't sit in 'separating' forever.
+    job_service.recover_interrupted_jobs()
+
+    from services.device_service import DeviceService  # noqa: E402
+    demucs_cfg = DeviceService().detect()
+    print(f"  demucs: device={demucs_cfg['device']} ({demucs_cfg['label']}), "
+          f"threads={demucs_cfg['threads']}")
 
     server = ThreadingHTTPServer((HOST, PORT), AudioMassHandler)
     server.daemon_threads = True

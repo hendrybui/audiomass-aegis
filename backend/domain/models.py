@@ -69,7 +69,81 @@ class ToolReadiness(BaseModel):
     detail: Optional[str] = None
 
 
+class ContainerJobStats(BaseModel):
+    """Measured timings from the most recent container-backed separation.
+
+    wall_sec is the docker process wall time (launch to exit); compute_sec is
+    the worker's chunk inference + stem-write time, which is the part that
+    scales with track length (e.g. 20s of audio in ~3s); overhead_sec =
+    wall - compute is the fixed per-job cost (python/torch/HIP startup, model
+    load + warmup, teardown) that no optimization of the compute itself can
+    remove; ready_sec is the worker-reported warmup portion of that overhead.
+    realtime is the worker-reported compute ratio (compute / audio).
+    """
+
+    at: str
+    image: str
+    wall_sec: float
+    ready_sec: float
+    compute_sec: float
+    overhead_sec: float
+    audio_sec: float
+    realtime: float  # worker-reported ratio (compute / audio)
+
+
+class WarmPoolState(BaseModel):
+    """Live state of the warm-pool container (one model load, jobs reused).
+
+    up is whether the pool container is running right now; busy whether it is
+    currently separating a job. jobs_served is the CUMULATIVE count of jobs
+    the pool has completed — persisted across server restarts and container
+    generations (stats.json in the pool dir), so it reads as history, not
+    per-process state; ready_sec and started_at are the current generation's
+    one-time startup (model load + HIP init + warmup forward).
+    idle_timeout_sec is the configured idle-eviction window: the supervisor
+    exits (releasing the GPU) after that long without a job, and eviction
+    records why the last container generation ended ('idle' |
+    'stale_heartbeat' | 'shutdown') until a new generation starts.
+    first_seen_at/last_activity_at anchor the persisted history, and last_job
+    mirrors ContainerJobStats for the most recent pool job, whose overhead is
+    near-zero because the startup is not re-paid.
+    """
+
+    up: bool = False
+    busy: bool = False
+    jobs_served: int = 0
+    ready_sec: Optional[float] = None
+    started_at: Optional[str] = None
+    idle_timeout_sec: Optional[float] = None
+    first_seen_at: Optional[str] = None
+    last_activity_at: Optional[str] = None
+    eviction: Optional[str] = None
+    evicted_at: Optional[str] = None
+    last_job: Optional[ContainerJobStats] = None
+
+
+class SeparationBackend(BaseModel):
+    """Which separation engine is active and whether it's healthy right now.
+
+    backend is what the next job would use: 'rocm_container' when the
+    configured docker image is available (GPU), 'cpu_worker' otherwise.
+    container_available + detail explain why the container is or isn't used.
+    warm_pool is the live state of the persistent warm-pool container when
+    the container backend is in use.
+    """
+
+    backend: str  # 'rocm_container' | 'cpu_worker'
+    device: str  # 'cuda' | 'cpu'
+    image: Optional[str] = None
+    container_available: bool = False
+    detail: Optional[str] = None
+    last_job: Optional[ContainerJobStats] = None
+    warm_pool: Optional[WarmPoolState] = None
+
+
 class DiagnosticsResponse(BaseModel):
     service: str = "splinter-x"
     ready: bool
     tools: list[ToolReadiness]
+    plugins: list[str] = []  # registered processing capabilities (see plugins/registry.py)
+    separation: Optional[SeparationBackend] = None

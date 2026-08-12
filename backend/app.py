@@ -27,6 +27,10 @@ def create_app() -> FastAPI:
     app.include_router(projects_router, prefix="/api")
     app.include_router(streams_router, prefix="/api")
 
+    # Jobs left mid-flight by a previous server process can never finish;
+    # mark them failed so they don't sit in a non-terminal state forever.
+    job_service.recover_interrupted_jobs()
+
     @app.get("/api/health")
     async def health() -> dict:
         return {"status": "ok", "service": "audiomass-stems"}

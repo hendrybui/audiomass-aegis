@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from threading import Lock
 from uuid import uuid4
 
-from domain.enums import JobStatus
+from domain.enums import JobStatus, SourceType
 from domain.models import AnalysisSummary, CreateJobRequest, JobSnapshot, ManifestResponse, ManifestSource
 from services.cancellation_service import cancellation_service
 from services.event_bus import event_bus
@@ -30,8 +30,42 @@ class JobService:
         self._store = JobStore()
         self._pipeline = None
 
+    TERMINAL_STATUSES = {JobStatus.done, JobStatus.failed, JobStatus.cancelled}
+
     def attach_pipeline(self, pipeline: 'PipelineService') -> None:
         self._pipeline = pipeline
+
+    def recover_interrupted_jobs(self) -> None:
+        """Mark jobs persisted in a non-terminal state as failed.
+
+        The pipeline runs in daemon threads; when the server process dies or is
+        restarted mid-job (crash, OOM kill, manual restart), the on-disk
+        snapshot keeps saying e.g. 'separating' forever. The UI then shows a
+        job that can never finish and blocks its disk entry from being cleaned
+        up. Called once at server startup; the message makes clear the work was
+        interrupted rather than genuinely failed.
+        """
+        interrupted: list[str] = []
+        with self._lock:
+            for entry in self._store.jobs_root.iterdir():
+                if not entry.is_dir():
+                    continue
+                snapshot = self._store.load_snapshot(entry.name)
+                if snapshot is None or snapshot.status in self.TERMINAL_STATUSES:
+                    continue
+                manifest = self._store.load_manifest(entry.name)
+                if manifest is None:
+                    # Minimal stand-in so mark_failed can persist coherent state.
+                    manifest = ManifestResponse(
+                        job_id=entry.name,
+                        status=snapshot.status,
+                        source=ManifestSource(type=SourceType.upload),
+                    )
+                self._jobs[entry.name] = snapshot
+                self._manifests[entry.name] = manifest
+                interrupted.append(entry.name)
+        for job_id in interrupted:
+            self.mark_failed(job_id, 'Job interrupted by server restart')
 
     def create_job(self, payload: CreateJobRequest) -> JobSnapshot:
         validate_create_job_request(payload)
@@ -77,6 +111,14 @@ class JobService:
     def get_job(self, job_id: str) -> JobSnapshot | None:
         snapshot = self._jobs.get(job_id) or self._store.load_snapshot(job_id)
         return deepcopy(snapshot) if snapshot else None
+
+    def get_active_job(self) -> JobSnapshot | None:
+        """The currently running job, if any (None when idle or after a restart
+        has recovered stranded jobs). Used by the frontend to resume the
+        progress modal after a page reload."""
+        with self._lock:
+            job_id = self._active_job_id
+        return self.get_job(job_id) if job_id else None
 
     def get_manifest(self, job_id: str) -> ManifestResponse | None:
         manifest = self._manifests.get(job_id) or self._store.load_manifest(job_id)

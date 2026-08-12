@@ -3,18 +3,14 @@ from __future__ import annotations
 import logging
 import shutil
 from pathlib import Path
-from threading import Lock, Thread
+from threading import Thread
 
-from adapters.demucs_adapter import DemucsAdapter
 from adapters.ffmpeg_adapter import FFmpegAdapter
-from adapters.optimized_demucs import OptimizedDemucs
-from adapters.process_utils import ExternalToolError, append_log
+from adapters.process_utils import append_log
 from adapters.yt_dlp_adapter import YtDlpAdapter
 from domain.enums import JobStatus, SourceType
-from services.analysis_service import AnalysisService
+from plugins import CancelledError, PluginContext, plugin_registry
 from services.cancellation_service import cancellation_service
-from services.device_service import DeviceService
-from services.waveform_service import WaveformService
 from storage.job_store import JobStore
 
 log = logging.getLogger("audiomass.pipeline")
@@ -28,14 +24,6 @@ class PipelineService:
         self.job_store = JobStore()
         self.yt_dlp = YtDlpAdapter()
         self.ffmpeg = FFmpegAdapter()
-        self.demucs = DemucsAdapter()
-        self.device_service = DeviceService()
-        self.analysis_service = AnalysisService()
-        self.waveform_service = WaveformService()
-        # The PyTorch separator is expensive to build (model load + warmup), so
-        # it is constructed lazily on first use and then reused across jobs.
-        self._separator: OptimizedDemucs | None = None
-        self._separator_lock = Lock()
 
     def start(self, job_id: str) -> None:
         Thread(target=self.run, args=(job_id,), daemon=True).start()
@@ -64,7 +52,7 @@ class PipelineService:
             self.job_service.update_job(job_id, status=JobStatus.separating, progress=0.55, step=JobStatus.separating.value, message='Separating selected stems')
             manifest_after_transcode = self.job_service.get_manifest(job_id)
             selected_stems = manifest_after_transcode.selected_stems if manifest_after_transcode else []
-            final_stems = self._separate_or_fallback(job_id, canonical_wav, selected_stems, job_dir, log_path)
+            final_stems = self._separate_stems(job_id, canonical_wav, selected_stems, job_dir, log_path)
             self.job_service.update_manifest_files(job_id, final_stems)
 
             self._check_cancel(job_id)
@@ -82,13 +70,13 @@ class PipelineService:
             all_stem_paths = dict(final_stems)
             all_stem_paths['mix'] = str(mix_path)
             all_stem_paths['original'] = str(original_path)
-            analysis = self.analysis_service.analyze(job_id, job_dir, str(canonical_wav), all_stem_paths)
+            analysis = self._analyze_stems(job_id, str(canonical_wav), all_stem_paths, job_dir, log_path)
             self.job_service.update_analysis(job_id, analysis)
 
             # --- Waveform generation ---
             self._check_cancel(job_id)
             self.job_service.update_job(job_id, status=JobStatus.analyzing, progress=0.92, step='generating_waveforms', message='Generating waveform summaries')
-            waveform_map = self.waveform_service.generate_for_stems(job_dir, all_stem_paths)
+            waveform_map = self._generate_waveforms(job_id, all_stem_paths, job_dir, log_path)
             for stem_name, wf_path in waveform_map.items():
                 self.job_service.update_manifest_files(job_id, {f'waveform_{stem_name}': wf_path})
 
@@ -148,68 +136,94 @@ class PipelineService:
             raise RuntimeError('URL-based job missing source URL')
         return Path(self.yt_dlp.download(url, str(source_dir), job_id=job_id, log_path=log_path))
 
-    def _get_separator(self) -> OptimizedDemucs:
-        """Lazily build and cache the PyTorch separator.
+    def _separate_stems(self, job_id: str, canonical_wav: Path, selected_stems: list[str], job_dir: Path, log_path: Path) -> dict[str, str]:
+        """Drive the 'htdemucs' plugin through the uniform plugin contract.
 
-        Building it loads the model weights and runs a warmup pass, which takes
-        long enough that doing it per-job dominated wall-clock time. Caching it
-        means only the first job pays that cost.
+        The plugin owns device detection, the PyTorch worker child process
+        and the CLI fallback; it reports progress through the context. This
+        method only maps the plugin's phase-relative progress onto the job's
+        separating span and relays cancellation/logging.
         """
-        if self._separator is None:
-            with self._separator_lock:
-                if self._separator is None:
-                    self._separator = OptimizedDemucs()
-        return self._separator
+        plugin = plugin_registry.require('htdemucs')
 
-    def _separate_or_fallback(self, job_id: str, canonical_wav: Path, selected_stems: list[str], job_dir: Path, log_path: Path) -> dict[str, str]:
-        raw_dir = job_dir / 'stems_raw'
-        final_dir = job_dir / 'stems'
-        raw_stems: dict[str, str] = {}
-
-        # In-process PyTorch separator (float32, no torch.compile on CPU).
-        # NOTE: CancelledError must propagate — it is NOT a separator failure.
-        try:
-            append_log(log_path, 'Separating stems with HTDemucs (PyTorch, CPU)')
-            separator = self._get_separator()
-            raw_stems = separator.separate(
-                str(canonical_wav), str(final_dir),
-                progress_callback=lambda done, total: self._separation_progress(job_id, done, total),
+        def on_progress(fraction: float, *, stage: str | None = None, message: str | None = None) -> None:
+            base, span = 0.55, 0.25
+            pct = base + fraction * span
+            self.job_service.update_job(
+                job_id,
+                status=JobStatus.separating,
+                progress=round(pct, 2),
+                step=stage or JobStatus.separating.value,
+                message=message or 'Separating selected stems',
             )
-            outputs: dict[str, str] = {}
-            for stem in selected_stems:
-                target = final_dir / f'{stem}.wav'
-                outputs[stem] = str(target) if target.exists() else ''
-            return outputs
-        except CancelledError:
-            # User cancelled — never fall back, just stop.
-            raise
-        except Exception as exc:
-            append_log(log_path, f'PyTorch separator failed, falling back to Demucs CLI: {exc}')
-            raw_stems = {}
 
-        # Fallback: Demucs CLI
-        detected_device = self.device_service.detect().get('device', 'cpu')
-        try:
-            raw_stems = self.demucs.separate(str(canonical_wav), str(raw_dir), job_id=job_id, log_path=log_path, device=detected_device)
-        except ExternalToolError as exc:
-            append_log(log_path, f'Demucs unavailable or failed, using placeholder fallback: {exc}')
-            raw_stems = {}
-        outputs = {}
-        for stem in selected_stems:
-            target = final_dir / f'{stem}.wav'
-            if stem in raw_stems:
-                self.ffmpeg.copy_audio(raw_stems[stem], str(target))
-            else:
-                self.ffmpeg.copy_audio(str(canonical_wav), str(target))
-            outputs[stem] = str(target)
-        return outputs
+        ctx = PluginContext(
+            job_id=job_id,
+            work_dir=job_dir,
+            params={'input_path': str(canonical_wav), 'stems': selected_stems},
+            progress=on_progress,
+            log=lambda line: append_log(log_path, line),
+            log_path=log_path,
+            is_cancelled=lambda: cancellation_service.is_cancelled(job_id),
+        )
+        return plugin.run(ctx)
 
-    def _separation_progress(self, job_id: str, done: int, total: int) -> None:
-        """Update job progress during chunk-based separation."""
-        base = 0.55
-        span = 0.25
-        pct = base + (done / max(total, 1)) * span
-        self.job_service.update_job(job_id, status=JobStatus.separating, progress=round(pct, 2), step=JobStatus.separating.value, message=f'Separating stems ({done}/{total} chunks)')
+    def _analyze_stems(self, job_id: str, canonical_wav: str, all_stem_paths: dict[str, str], job_dir: Path, log_path: Path) -> dict:
+        """Drive the 'analyze' plugin through the uniform plugin contract.
+
+        The plugin reports step-wise progress (tempo/key, loudness, duration,
+        per-stem energy) which this method maps onto the job's analyzing span
+        (0.88 -> 0.92, where waveform generation takes over)."""
+        plugin = plugin_registry.require('analyze')
+
+        def on_progress(fraction: float, *, stage: str | None = None, message: str | None = None) -> None:
+            base, span = 0.88, 0.04
+            pct = base + fraction * span
+            self.job_service.update_job(
+                job_id,
+                status=JobStatus.analyzing,
+                progress=round(pct, 2),
+                step=stage or JobStatus.analyzing.value,
+                message=message or 'Analyzing audio (BPM, key, loudness)',
+            )
+
+        ctx = PluginContext(
+            job_id=job_id,
+            work_dir=job_dir,
+            params={'input_path': canonical_wav, 'stems': all_stem_paths},
+            progress=on_progress,
+            log=lambda line: append_log(log_path, line),
+            is_cancelled=lambda: cancellation_service.is_cancelled(job_id),
+        )
+        return plugin.run(ctx)
+
+    def _generate_waveforms(self, job_id: str, all_stem_paths: dict[str, str], job_dir: Path, log_path: Path) -> dict[str, str]:
+        """Drive the 'waveform' plugin through the uniform plugin contract.
+
+        The plugin reports one progress step per stem, mapped onto the job's
+        0.92 -> 0.95 span (packaging takes over at 0.95)."""
+        plugin = plugin_registry.require('waveform')
+
+        def on_progress(fraction: float, *, stage: str | None = None, message: str | None = None) -> None:
+            base, span = 0.92, 0.03
+            pct = base + fraction * span
+            self.job_service.update_job(
+                job_id,
+                status=JobStatus.analyzing,
+                progress=round(pct, 2),
+                step=stage or 'generating_waveforms',
+                message=message or 'Generating waveform summaries',
+            )
+
+        ctx = PluginContext(
+            job_id=job_id,
+            work_dir=job_dir,
+            params={'stems': all_stem_paths},
+            progress=on_progress,
+            log=lambda line: append_log(log_path, line),
+            is_cancelled=lambda: cancellation_service.is_cancelled(job_id),
+        )
+        return plugin.run(ctx)
 
     def _check_cancel(self, job_id: str) -> None:
         if cancellation_service.is_cancelled(job_id):
@@ -232,7 +246,3 @@ class PipelineService:
         if 'Required command not found' in message:
             return message + '. Install the missing tool and ensure it is on PATH.'
         return f'Pipeline failed: {message}'
-
-
-class CancelledError(Exception):
-    pass

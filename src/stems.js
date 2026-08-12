@@ -19,6 +19,10 @@
 		var separating = false;
 		var current_job_id = null;
 		var event_source = null;
+		// Set once a terminal outcome (done/failed/cancelled) has been handled,
+		// so a late EventSource `error` event can't double-fire the finalize
+		// path (e.g. loading the stems twice into the multitrack).
+		var jobFinished = false;
 
 		// ---- Stem Settings ----
 		var stemSettings = {
@@ -224,6 +228,7 @@
 					if ( data.status === 'done' ) {
 						// Job already completed - load stems immediately
 						closeSSE();
+						jobFinished = true;
 						updateProgress( 100, 'Loading stems...' );
 						loadStems( current_job_id );
 					}
@@ -252,12 +257,14 @@
 
 			event_source.addEventListener( 'job_done', function ( e ) {
 				closeSSE();
+				jobFinished = true;
 				updateProgress( 100, 'Loading stems...' );
 				loadStems( jobId );
 			});
 
 			event_source.addEventListener( 'job_failed', function ( e ) {
 				closeSSE();
+				jobFinished = true;
 				separating = false;
 				hideProgressModal();
 				var msg = 'Separation failed';
@@ -267,14 +274,69 @@
 
 			event_source.addEventListener( 'job_cancelled', function () {
 				closeSSE();
+				jobFinished = true;
 				separating = false;
 				hideProgressModal();
 				OneUp && OneUp( 'Separation cancelled', 2000 );
 			});
 
 			event_source.onerror = function () {
+				// EventSource errors are transient: proxy hiccups, server
+				// restarts, tab throttling, or a dropped keep-alive during a
+				// long separation. Closing here used to leave the progress
+				// modal stuck forever with `separating` locked true — the
+				// "separation stopped loading" symptom. Stop the stream and
+				// poll the job state instead, then finalize when terminal.
+				if ( jobFinished ) return;
 				closeSSE();
+				if ( current_job_id ) {
+					pollJobUntilTerminal( current_job_id );
+				} else {
+					separating = false;
+					hideProgressModal();
+				}
 			};
+		}
+
+		// ---- Poll job state after an SSE drop ----
+		function pollJobUntilTerminal ( jobId ) {
+			var failedPolls = 0;
+			var timer = setInterval( function () {
+				fetch( API_BASE + '/jobs/' + jobId )
+					.then( function ( r ) { return r.json(); } )
+					.then( function ( data ) {
+						if ( !data || !data.status ) {
+							throw new Error( 'No status' );
+						}
+						failedPolls = 0;
+						if ( data.status === 'done' ) {
+							clearInterval( timer );
+							updateProgress( 100, 'Loading stems...' );
+							loadStems( jobId );
+						} else if ( data.status === 'failed' || data.status === 'cancelled' ) {
+							clearInterval( timer );
+							separating = false;
+							hideProgressModal();
+							var msg = data.status === 'cancelled'
+								? 'Separation cancelled'
+								: ( data.message || 'Separation failed' );
+							OneUp && OneUp( msg, 3000 );
+						} else {
+							// Still running server-side — mirror latest progress
+							// so the modal keeps moving instead of freezing.
+							updateProgress( ( data.progress || 0 ) * 100, data.message || 'Processing...' );
+						}
+					} )
+					.catch( function () {
+						// Give up only if the backend stays unreachable.
+						if ( ++failedPolls >= 12 ) {
+							clearInterval( timer );
+							separating = false;
+							hideProgressModal();
+							OneUp && OneUp( 'Lost connection to the separation server', 3000 );
+						}
+					} );
+			}, 5000 );
 		}
 
 		function closeSSE () {
@@ -282,6 +344,31 @@
 				event_source.close();
 				event_source = null;
 			}
+		}
+
+		// ---- Resume an in-flight job after a page reload ----
+		// A separation runs for many minutes; if the page is reloaded mid-run,
+		// the modal and SSE stream are gone while the server keeps working. On
+		// boot, ask for the active job and restore the progress modal, polling
+		// to the terminal state. Without this the user would lose track of the
+		// job entirely and the next upload would hit "Only one active job".
+		function resumeActiveJob () {
+			fetch( API_BASE + '/jobs/active' )
+				.then( function ( r ) {
+					if ( !r.ok ) return null;
+					return r.json();
+				} )
+				.then( function ( job ) {
+					if ( !job || !job.job_id ) return;
+					if ( [ 'done', 'failed', 'cancelled' ].indexOf( job.status ) >= 0 ) return;
+					current_job_id = job.job_id;
+					jobFinished = false;
+					separating = true;
+					showProgressModal();
+					updateProgress( ( job.progress || 0 ) * 100, job.message || 'Processing...' );
+					pollJobUntilTerminal( job.job_id );
+				} )
+				.catch( function () {} );
 		}
 
 		// ---- Load stems into multitrack ----
@@ -338,12 +425,14 @@
 						}
 
 						separating = false;
+						jobFinished = true;
 						hideProgressModal();
 						OneUp && OneUp( 'Stems loaded!', 2000 );
 					});
 				})
 				.catch( function ( err ) {
 					separating = false;
+					jobFinished = true;
 					hideProgressModal();
 					OneUp && OneUp( 'Failed to load stems', 2000 );
 				});
@@ -372,6 +461,7 @@
 			}
 
 			separating = true;
+			jobFinished = false;
 			showProgressModal();
 			updateProgress( 5, 'Encoding audio...' );
 
@@ -403,6 +493,10 @@
 		};
 
 		q.isSeparating = function () { return separating; };
+
+		// If a separation was in flight when this page loaded, bring back the
+		// progress modal and follow it to completion.
+		resumeActiveJob();
 
 		// ---- Show Settings Modal ----
 		q.showSettingsModal = function () {
