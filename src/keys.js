@@ -14,7 +14,14 @@
 		};
 		q.isEditTarget = function ( e ) {
 			var t = e && e.target;
-			return !!(t && /INPUT|TEXTAREA|SELECT/.test (t.tagName));
+			if (!t) return false;
+			if (/INPUT|TEXTAREA|SELECT/.test (t.tagName)) return true;
+			// contenteditable inline editors: element itself or any ancestor
+			for (var n = t; n && n.nodeType === 1; n = n.parentElement) {
+				var ce = n.getAttribute && n.getAttribute ('contenteditable');
+				if (ce === '' || ce === 'true') return true;
+			}
+			return false;
 		};
 
 		q.addCallback = function (callback_name, callback_function, keys) {
@@ -41,6 +48,9 @@
 
 		q.keyDown = function (keyCode, e ) {
 			q.keyMap[keyCode] = 1;
+
+			// never fire app shortcuts while typing in an editable field
+			if (q.isEditTarget (e)) return ;
 
 			for (var key in q.callbacks) {
 				var group = q.callbacks[key];

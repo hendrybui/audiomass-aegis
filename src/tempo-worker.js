@@ -1,7 +1,7 @@
 (function ( w ) {
 	'use strict';
 
-	importScripts ('tempo-estimator.js?v=mt2');
+	importScripts ('tempo-estimator.js?v=mt5');
 
 	function makeBuffer ( data ) {
 		return ({

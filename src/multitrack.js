@@ -9,6 +9,7 @@
 		var track_uid = 1;
 		var clip_uid = 1;
 		var selected_track = null;
+		var all_tracks_sel = false;
 		var selected_clip = null;
 		var selected_clips = {};
 		var editing_clip = null;
@@ -128,6 +129,11 @@
 		var btn_snap = null;
 		var btn_sig = null;
 		var bpm_input = null;
+		var bpm_badge = null;
+		var bpm_known = false;
+		var bpm_auto = false;
+		var beat_key = null;
+		var badge_bpm = 120;
 		var bpm_range = null;
 		var bpm_range_down = null;
 		var btn_clear_mute = null;
@@ -502,6 +508,12 @@
 			return null;
 		}
 
+		function selectedTracks () {
+			if (all_tracks_sel) return tracks.slice (0);
+			var t = findTrack ( selected_track );
+			return t ? [t] : [];
+		}
+
 		function activeTrack () {
 			for (var i = 0; i < tracks.length; ++i)
 				if (tracks[i].rec) return tracks[i];
@@ -647,6 +659,11 @@
 			app.el.insertBefore ( el, footer );
 
 			side = el.getElementsByClassName ('pk_mt_side')[0];
+			side.className += ' pk_mt_side_min';
+			side.addEventListener ('contextmenu', function ( e ) {
+				e.preventDefault ();
+				side.classList.toggle ('pk_mt_side_min');
+			});
 			tracks_wrap = el.getElementsByClassName ('pk_mt_tracks_wrap')[0];
 			tracks_el = el.getElementsByClassName ('pk_mt_tracks')[0];
 			main = el.getElementsByClassName ('pk_mt_main')[0];
@@ -729,6 +746,7 @@
 			tr.name = 'Channel ' + (tracks.length + 1);
 			if (index === undefined) tracks.push ( tr );
 			else tracks.splice ( Math.max (0, Math.min (index, tracks.length)), 0, tr );
+			all_tracks_sel = false;
 			selected_track = tr.id;
 			pushState ( prev, 'Add Channel' );
 			render ();
@@ -852,8 +870,8 @@
 				if (val > 0) setBeatBpm ( val, true );
 				syncBpmRange ();
 			};
-			bpm_input.onchange = function () { setBeatBpm ( bpm_input.value ); };
-			bpm_input.onblur = function () { setBeatBpm ( bpm_input.value ); };
+			bpm_input.onchange = function () { setBeatBpm ( bpm_input.value ); markBpmManual (); };
+			bpm_input.onblur = function () { setBeatBpm ( bpm_input.value ); markBpmManual (); };
 			bpm_input.onfocus = showBpmRange;
 
 			beat_bar.appendChild ( btn_beat );
@@ -1234,7 +1252,7 @@
 		function renderTrack ( track, top, h ) {
 			var row = d.createElement ('div');
 			row.className = 'pk_mt_track' +
-				(track.id === selected_track ? ' pk_mt_sel' : '') +
+				(all_tracks_sel || track.id === selected_track ? ' pk_mt_sel' : '') +
 				(h < 72 ? ' pk_mt_compact' : '') +
 				(h < 62 ? ' pk_mt_tiny' : '');
 			row.setAttribute ('data-track', track.id);
@@ -1324,6 +1342,7 @@
 			row.onclick = function ( e ) {
 				if (e.target === input) return ;
 				blurActive ();
+				all_tracks_sel = false;
 				selected_track = track.id;
 				render ();
 			};
@@ -1340,12 +1359,13 @@
 			row.addEventListener ('dragover', stopDrag, false);
 			row.addEventListener ('drop', function ( e ) {
 				stopDrag ( e );
+				all_tracks_sel = false;
 				selected_track = track.id;
 				addFiles ( e.dataTransfer.files, track.id, marker );
 			}, false);
 
 			var lane = d.createElement ('div');
-			lane.className = 'pk_mt_lane' + (track.id === selected_track ? ' pk_mt_sel' : '');
+			lane.className = 'pk_mt_lane' + (all_tracks_sel || track.id === selected_track ? ' pk_mt_sel' : '');
 			lane.style.top = top + 'px';
 			lane.style.height = h + 'px';
 			lane.setAttribute ('data-track', track.id);
@@ -1353,6 +1373,7 @@
 			lane.addEventListener ('drop', function ( e ) {
 				stopDrag ( e );
 				var tid = this.getAttribute ('data-track');
+				all_tracks_sel = false;
 				selected_track = tid;
 				addFiles ( e.dataTransfer.files, tid, timeFromEvent ( e ) );
 			}, false);
@@ -1365,9 +1386,14 @@
 		}
 
 		function setTrackFlag ( track, flag, value, desc ) {
-			if (track[flag] === value) return ;
+			var target = selectedTracks ();
+			var changed = false;
+			for (var i = 0; i < target.length; ++i)
+				if (target[i][flag] !== value) { changed = true; break; }
+			if (!changed) return ;
 			var prev = cloneState ();
-			track[flag] = value;
+			for (var i = 0; i < target.length; ++i)
+				target[i][flag] = value;
 			pushState ( prev, desc );
 			refreshMix ();
 			render ();
@@ -1430,6 +1456,43 @@
 			}
 			syncBpmRange ();
 			if (!soft) updateBeatUI ();
+			updateBpmBadge ();
+		}
+
+		function markBpmManual () {
+			bpm_known = true;
+			bpm_auto = false;
+			badge_bpm = parseFloat (bpm_input.value) || badge_bpm;
+			updateBpmBadge ();
+		}
+
+		function updateBpmBadge () {
+			if (!bpm_known) {
+				if (bpm_badge && bpm_badge.parentNode)
+					bpm_badge.parentNode.removeChild ( bpm_badge );
+				bpm_badge = null;
+				return ;
+			}
+			var host = app.el.getElementsByClassName ('pk_av_cont')[0] || app.el;
+			if (!host) return ;
+			if (!bpm_badge || bpm_badge.parentNode !== host) {
+				bpm_badge = d.createElement ('div');
+				bpm_badge.className = 'pk_bpm_info';
+				bpm_badge.style.position = 'absolute';
+				bpm_badge.style.right = '14px';
+				bpm_badge.style.top = '8px';
+				bpm_badge.style.zIndex = '4';
+				bpm_badge.style.pointerEvents = 'none';
+				bpm_badge.style.font = '12px/1 var(--ff-mono)';
+				bpm_badge.style.color = '#f0d878';
+				bpm_badge.style.background = 'rgba(10,12,14,.72)';
+				bpm_badge.style.border = '1px solid rgba(240,216,120,.45)';
+				bpm_badge.style.borderRadius = '3px';
+				bpm_badge.style.padding = '3px 8px';
+				bpm_badge.style.letterSpacing = '.5px';
+				host.appendChild ( bpm_badge );
+			}
+			bpm_badge.textContent = '♪ ' + Math.round (badge_bpm) + ' BPM' + (beat_key ? ' · ' + beat_key : '') + (bpm_auto ? ' · auto' : '');
 		}
 
 		function beatStep () {
@@ -1483,6 +1546,7 @@
 
 		function removeTrack ( track ) {
 			if (tracks.length < 2) return ;
+			all_tracks_sel = false;
 			var prev = cloneState ();
 			for (var i = tracks.length - 1; i >= 0; --i)
 				if (tracks[i].id === track.id) tracks.splice (i, 1);
@@ -1550,9 +1614,14 @@
 			knob.ondblclick = function ( e ) {
 				e.preventDefault ();
 				e.stopPropagation ();
-				if (track.vol === 1 || track.vol === undefined) return ;
+				var target = selectedTracks ();
+				var any = false;
+				for (var i = 0; i < target.length; ++i)
+					if (target[i].vol !== 1 && target[i].vol !== undefined) { any = true; break; }
+				if (!any) return ;
 				var p = cloneState ();
-				track.vol = 1;
+				for (var i = 0; i < target.length; ++i)
+					target[i].vol = 1;
 				pushState ( p, 'Volume Channel' );
 				refreshMix ();
 				render ();
@@ -1561,7 +1630,9 @@
 			function move ( e ) {
 				var val = Math.max (0, Math.min (1, start_vol + knobDelta ( e, start_x, start_y ) / 90));
 				if (Math.abs (val - (track.vol === undefined ? 1 : track.vol)) > 0.001) moved = true;
-				track.vol = val;
+				var target = selectedTracks ();
+				for (var i = 0; i < target.length; ++i)
+					target[i].vol = val;
 				updateVolume ( knob, val );
 				refreshMix ();
 			}
@@ -1595,9 +1666,14 @@
 			knob.ondblclick = function ( e ) {
 				e.preventDefault ();
 				e.stopPropagation ();
-				if (track.pan === 0) return ;
+				var target = selectedTracks ();
+				var any = false;
+				for (var i = 0; i < target.length; ++i)
+					if (target[i].pan !== 0) { any = true; break; }
+				if (!any) return ;
 				var p = cloneState ();
-				track.pan = 0;
+				for (var i = 0; i < target.length; ++i)
+					target[i].pan = 0;
 				pushState ( p, 'Pan Channel' );
 				refreshMix ();
 				render ();
@@ -1606,7 +1682,9 @@
 			function move ( e ) {
 				var val = Math.max (-1, Math.min (1, start_pan + knobDelta ( e, start_x, start_y ) / 80));
 				if (Math.abs (val - track.pan) > 0.001) moved = true;
-				track.pan = val;
+				var target = selectedTracks ();
+				for (var i = 0; i < target.length; ++i)
+					target[i].pan = val;
 				updateKnob ( knob, val );
 				refreshMix ();
 			}
@@ -1829,6 +1907,7 @@
 
 		function selectTrackByOffset ( diff ) {
 			if (!tracks.length) return true;
+			all_tracks_sel = false;
 
 			var old = selected_track ? trackIndex ( selected_track ) : -1;
 			var index = old < 0 ? 0 : old + diff;
@@ -2066,6 +2145,7 @@
 	function selectClip ( clip, additive ) {
 			// eraser mode: delete instead of select
 			if (mt_erase_mode) { eraseCheck (clip.id); return; }
+			all_tracks_sel = false;
 			if (additive) {
 				// Shift+click: toggle clip in multi-select
 				if (selected_clips[clip.id]) {
@@ -2105,6 +2185,21 @@
 			app.fireEvent ('DidDeselectClip');
 			if (!silent) app.fireEvent ('DidDestroyRegion');
 			render ();
+			return true;
+		}
+
+		function SelectAllClips () {
+			all_tracks_sel = true;
+			if (!clips.length) { render (); return true; }
+			stopFxPreview ( true );
+			selected_clips = {};
+			for (var i = 0; i < clips.length; ++i)
+				selected_clips[clips[i].id] = true;
+			var last = clips[clips.length - 1];
+			selected_clip = last.id;
+			selected_track = last.track;
+			render ();
+			app.fireEvent ('DidSelectClip', last);
 			return true;
 		}
 
@@ -3507,6 +3602,19 @@
 			}
 			updatePlayhead ();
 			fireZoom ();
+		}
+
+		function JumpGrid ( dir ) {
+			if (!hasClips ()) return ;
+			var bpm = beat_bpm || 120;
+			var interval = 60 / bpm; // seconds per beat (grid line)
+			if (!(interval > 0)) return ;
+			var cur = (play ? playingCursor () : cursor);
+			var target = (dir > 0)
+				? Math.ceil ( (cur + 0.0001) / interval ) * interval
+				: Math.floor ( (cur - 0.0001) / interval ) * interval;
+			if (!(target >= 0)) target = 0;
+			setCursorTime ( target );
 		}
 
 		function SeekTo ( progress ) {
@@ -5532,6 +5640,11 @@
 		q.IsRecording = function () { return !!rec; };
 		q.IsPlaying = function () { return !!play; };
 		q.Toggle = Toggle;
+		q.JumpGrid = JumpGrid;
+		q.SelectAllClips = SelectAllClips;
+		q.SelectAllTracks = function () { all_tracks_sel = true; render (); return true; };
+		q.DeselectAllTracks = function () { all_tracks_sel = false; render (); return true; };
+		q.AreAllTracksSelected = function () { return all_tracks_sel; };
 		q.Play = Play;
 		q.Pause = Pause;
 		q.Stop = Stop;
@@ -5981,6 +6094,14 @@
 
 		q.GetTempoBuffer = GetTempoBuffer;
 		q.SetBPM = function ( bpm ) { setBeatBpm ( bpm ); };
+		q.ApplyDetectedBpm = function ( bpm, key ) {
+			if (!bpm || !isFinite (bpm)) return ;
+			bpm_known = true;
+			bpm_auto = true;
+			beat_key = key || null;
+			badge_bpm = bpm;
+			updateBpmBadge ();
+		};
 		q.RecordToggle = RecordToggle;
 		q.RecordStart = RecordStart;
 		q.RecordStop = RecordStop;
@@ -6332,6 +6453,11 @@
 		app.listenFor ('DidUpdateLen', syncEditingClip);
 		app.listenFor ('DidUnloadFile', function () {
 			if (!on) editing_clip = null;
+			bpm_known = false;
+			bpm_auto = false;
+			beat_key = null;
+			badge_bpm = 120;
+			updateBpmBadge ();
 		});
 		app.listenFor ('RequestDetachClipEditor', function () {
 			editing_clip = null;

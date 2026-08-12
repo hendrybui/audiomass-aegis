@@ -469,7 +469,92 @@
 			// app.fireEvent ('DidResize');
 		});
 
+		// --- auto BPM detection: scan the loaded song and match the beat grid ---
+		var tempo_job = 0;
+		var tempo_worker = null;
+
+		function trimmedTempoBuffer ( buffer, max_sec ) {
+			var len = Math.min (buffer.length, Math.max (1, Math.floor ((max_sec || 180) * buffer.sampleRate)));
+			var total = Math.max (1, Math.min (2, buffer.numberOfChannels || 1));
+			var channels = [];
+			for (var i = 0; i < total; ++i)
+				channels.push (buffer.getChannelData (i).subarray (0, len));
+			return ({
+				sampleRate: buffer.sampleRate,
+				length: len,
+				duration: len / buffer.sampleRate,
+				numberOfChannels: total,
+				getChannelData: function ( idx ) { return channels[idx] || channels[0]; }
+			});
+		}
+
+		function packTempoPayload ( buffer, max_sec ) {
+			var view = trimmedTempoBuffer (buffer, max_sec);
+			var channels = [];
+			var transfer = [];
+			for (var i = 0; i < view.numberOfChannels; ++i) {
+				var copy = new Float32Array (view.getChannelData (i).length);
+				copy.set (view.getChannelData (i));
+				channels.push (copy);
+				transfer.push (copy.buffer);
+			}
+			return ({
+				data: { sampleRate: view.sampleRate, length: view.length, channels: channels },
+				transfer: transfer
+			});
+		}
+
+		function applyDetectedTempo ( job, ret ) {
+			if (job !== tempo_job) return ;
+			if (!ret || !ret.bpm || !(ret.confidence > 15)) return ;
+			if (app.multitrack && app.multitrack.ApplyDetectedBpm)
+				app.multitrack.ApplyDetectedBpm (ret.bpm, ret.key || null);
+			var label = ret.key ? ret.bpm + ' BPM · ' + ret.key : ret.bpm + ' BPM';
+			OneUp ('🎵 ' + label + ' detected — beat grid auto-matched', 2800);
+		}
+
+		function runMainTempo ( buffer, job ) {
+			var run = function () {
+				if (job !== tempo_job) return ;
+				try {
+					w.PKTempoEstimator.estimate (trimmedTempoBuffer (buffer, 180))
+						.then (function ( ret ) { applyDetectedTempo (job, ret); }, function () {});
+				} catch (e) {}
+			};
+			if (w.PKTempoEstimator) { run (); return ; }
+			app.loadScript ('tempo-estimator.js?v=mt5', run, function () {});
+		}
+
+		function autoDetectTempo () {
+			var buffer = wavesurfer.backend && wavesurfer.backend.buffer;
+			if (!buffer || !buffer.length) return ;
+			var job = ++tempo_job;
+			if (tempo_worker) {
+				tempo_worker.terminate ();
+				tempo_worker = null;
+			}
+			if (!w.Worker) { runMainTempo (buffer, job); return ; }
+			var payload = null;
+			try { payload = packTempoPayload (buffer, 180); }
+			catch (e) { runMainTempo (buffer, job); return ; }
+			try { tempo_worker = new Worker ('tempo-worker.js?v=mt4'); }
+			catch (e2) { runMainTempo (buffer, job); return ; }
+			tempo_worker.onmessage = function ( ev ) {
+				var data = ev.data || {};
+				if (data.id !== job) return ;
+				if (tempo_worker) { tempo_worker.terminate (); tempo_worker = null; }
+				if (data.error) return ;
+				applyDetectedTempo (job, data.result);
+			};
+			tempo_worker.onerror = function () {
+				if (tempo_worker) { tempo_worker.terminate (); tempo_worker = null; }
+				runMainTempo (buffer, job);
+			};
+			tempo_worker.postMessage ({ type: 'estimate', id: job, buffer: payload.data }, payload.transfer);
+		}
+
 		wavesurfer.on ('ready', function () {
+			autoDetectTempo ();
 			app.fireEvent ('DidReadyFire');
 
 			if (wavesurfer.backend._add) {
@@ -807,6 +892,8 @@
 			app.fireEvent ('RequestSelect');
 		}, [16, 65]);
 		accelBind ('KeyModSelectAll', 65, function () {
+			if (app.multitrack && app.multitrack.IsOn && app.multitrack.IsOn () &&
+				app.multitrack.SelectAllClips && app.multitrack.SelectAllClips ()) return ;
 			app.fireEvent ('RequestSelect');
 		});
 		app.ui.KeyHandler.addSingleCallback ('KeyLoopToggle', function ( e ) {
@@ -815,6 +902,25 @@
 			e.stopPropagation();
 			app.fireEvent ('RequestSetLoop');
 		}, 108);
+		// Home key = jump to the start of the song
+		app.ui.KeyHandler.addCallback ('KeyGoToStart' + app.id, function ( key, map, e ) {
+			if (app.ui.InteractionHandler.on || app.ui.KeyHandler.isEditTarget (e)) return ;
+			e.preventDefault ();
+			app.fireEvent ('RequestSeekTo', 0);
+		}, [36]);
+		// , = previous grid line, . = next grid line (MultiTrack beat grid)
+		app.ui.KeyHandler.addCallback ('KeyGridPrv' + app.id, function ( key, map, e ) {
+			if (app.ui.InteractionHandler.on || app.ui.KeyHandler.isEditTarget (e)) return ;
+			if (!(app.multitrack && app.multitrack.IsOn && app.multitrack.IsOn () && app.multitrack.JumpGrid)) return ;
+			e.preventDefault ();
+			app.multitrack.JumpGrid (-1);
+		}, [188]);
+		app.ui.KeyHandler.addCallback ('KeyGridNxt' + app.id, function ( key, map, e ) {
+			if (app.ui.InteractionHandler.on || app.ui.KeyHandler.isEditTarget (e)) return ;
+			if (!(app.multitrack && app.multitrack.IsOn && app.multitrack.IsOn () && app.multitrack.JumpGrid)) return ;
+			e.preventDefault ();
+			app.multitrack.JumpGrid (1);
+		}, [190]);
 		app.ui.KeyHandler.addCallback ('KeyShiftSave' + app.id, function ( key, map, e ) {
 			if (app.ui.InteractionHandler.on || accelHeld ( e )) return ;
 
