@@ -39,6 +39,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -130,8 +131,35 @@ def main() -> int:
         except OSError:
             pass
 
+    # The one-time model load (~35-45s) blocks, so run it on a thread and poll
+    # the shutdown/stale markers meanwhile — a server shutdown during warmup
+    # must not leave the container burning CPU until the load happens to end.
     boot_start = time.time()
-    separator = OptimizedDemucs(device=device)  # the one-time ~35s startup
+    separator: "OptimizedDemucs | None" = None
+    load_errors: list[BaseException] = []
+
+    def _load() -> None:
+        try:
+            nonlocal separator
+            separator = OptimizedDemucs(device=device)
+        except BaseException as exc:  # noqa: BLE001
+            load_errors.append(exc)
+
+    loader = threading.Thread(target=_load, daemon=True)
+    loader.start()
+    while loader.is_alive():
+        if shutdown_path.exists():
+            mark_evicted("shutdown")
+            log("Warm pool shutting down (shutdown marker during model load).")
+            return 0
+        if heartbeat_stale():
+            mark_evicted("stale_heartbeat")
+            log("Warm pool shutting down (stale heartbeat during model load).")
+            return 0
+        time.sleep(0.25)
+    if load_errors:
+        raise load_errors[0]
+    assert separator is not None
     boot_secs = time.time() - boot_start
     log(f"Warm pool ready in {boot_secs:.1f}s (device={device}).")
     try:

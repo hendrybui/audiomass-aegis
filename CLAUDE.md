@@ -167,6 +167,16 @@ back to the local CPU worker automatically otherwise:
   `shutdown`) for diagnostics until the next generation. One caveat: the
   pool container name is fixed, so a live pool belongs to whichever
   AudioMass started it.
+- **Graceful server shutdown** (SIGTERM / Ctrl+C): `main()` installs
+  handlers that stop everything cleanly — cancel the in-flight job (the
+  pipeline notices and terminates its worker), touch the pool's `shutdown`
+  marker and wait up to 30s for the supervisor to exit (force-`docker kill`
+  fallback if it doesn't), then close the HTTP server. A second signal
+  forces exit. The pool supervisor polls the shutdown marker **during** the
+  ~40s model load too (load runs on a thread), so a server stopped
+  mid-warmup releases the GPU in seconds instead of after the load
+  finishes: measured SIGTERM mid-load -> server exited in ~7s, container
+  dropped, `<JOBS_DIR>/_pool/evicted` = `shutdown`, zero orphan processes.
 - **One-command GPU check**: `../check-demucs-gpu.sh` (project root) starts
   docker if needed, ensures the demucs image (building the layer from
   `docker/Dockerfile.demucs-rocm` if only the base exists), then runs two

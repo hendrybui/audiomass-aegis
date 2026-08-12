@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -698,6 +700,88 @@ class AudioMassHandler(BaseHTTPRequestHandler):
             pass
 
 
+# --- graceful shutdown ------------------------------------------------------
+
+POOL_CONTAINER = "audiomass-demucs-pool"  # matches docker_runtime.POOL_CONTAINER
+
+
+def _pool_container_running() -> bool:
+    """True if the warm-pool container is still up (docker may be absent)."""
+    if not shutil.which("docker"):
+        return False
+    try:
+        out = subprocess.run(
+            ["docker", "ps", "-q", "--filter", f"name={POOL_CONTAINER}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return bool(out.stdout.strip())
+    except Exception:
+        return False
+
+
+def _graceful_shutdown(server: ThreadingHTTPServer) -> None:
+    """Stop audiomass cleanly: cancel in-flight separation, stop the warm
+    pool, then stop the HTTP server. Runs on its own thread so the signal
+    handler can return immediately."""
+    from services.cancellation_service import cancellation_service  # noqa: E402
+
+    print("\nAudiomass shutting down cleanly…")
+
+    # 1. Cancel the active job — the pipeline notices and terminates the
+    #    local worker (or signals the pool job) within a couple of seconds.
+    try:
+        active = job_service.get_active_job()
+        if active is not None:
+            print(f"  cancelling active job {active.job_id} …")
+            cancellation_service.request_cancel(active.job_id)
+            deadline = time.time() + 20
+            while time.time() < deadline:
+                job = job_service.get_job(active.job_id)
+                if job is None or job.status in job_service.TERMINAL_STATUSES:
+                    break
+                time.sleep(0.5)
+            print("  in-flight job cancelled.")
+        else:
+            print("  no active job.")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  (job cancel skipped: {exc})")
+
+    # 2. Stop the warm pool gracefully: the supervisor notices the shutdown
+    #    marker, records evicted=shutdown and exits; --rm drops the container.
+    #    If it doesn't stop within the window, force the container down so
+    #    shutdown never leaves the GPU busy.
+    try:
+        pool_dir = JOBS_DIR / "_pool"
+        shutdown_marker = pool_dir / "shutdown"
+        shutdown_marker.parent.mkdir(parents=True, exist_ok=True)
+        shutdown_marker.write_text("server graceful shutdown", encoding="utf-8")
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            if not (pool_dir / "ready").exists() and not _pool_container_running():
+                break
+            time.sleep(1)
+        if (pool_dir / "ready").exists() or _pool_container_running():
+            print("  pool did not stop in time — forcing container stop.")
+            (pool_dir / "evicted").write_text("shutdown", encoding="utf-8")
+            subprocess.run(
+                ["docker", "kill", POOL_CONTAINER], capture_output=True, timeout=10
+            )
+            deadline = time.time() + 10
+            while time.time() < deadline and _pool_container_running():
+                time.sleep(1)
+        if _pool_container_running():
+            print("  WARNING: pool container still present.")
+        else:
+            print("  warm pool stopped.")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  (pool stop skipped: {exc})")
+
+    try:
+        server.shutdown()
+    finally:
+        print("  HTTP server stopped. Clean shutdown complete.")
+
+
 # --- main -------------------------------------------------------------------
 def main():
     # Make sure the jobs root exists (JobStore does this too, but be defensive).
@@ -719,13 +803,29 @@ def main():
     print(f"  UI :  http://{HOST}:{PORT}/")
     print(f"  API:  http://{HOST}:{PORT}/api/jobs/upload  (HTDemucs stem separation)")
     print(f"  jobs root: {JOBS_DIR}")
-    print("Press Ctrl+C to stop.")
+    print("Press Ctrl+C to stop (SIGTERM also shuts down cleanly).")
+
+    stopping = threading.Event()
+
+    def _request_shutdown(signum, _frame):
+        if stopping.is_set():
+            print("\nSecond signal received — forcing exit.")
+            os._exit(1)
+        stopping.set()
+        threading.Thread(
+            target=_graceful_shutdown, args=(server,), daemon=True
+        ).start()
+
+    signal.signal(signal.SIGTERM, _request_shutdown)
+    signal.signal(signal.SIGINT, _request_shutdown)
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nStopping.")
+        # Fallback for platforms where the SIGINT handler didn't run in the
+        # main thread; serve_forever has already unwound, so this is safe.
+        _graceful_shutdown(server)
     finally:
-        server.shutdown()
         server.server_close()
 
 
