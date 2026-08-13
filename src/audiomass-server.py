@@ -11,6 +11,7 @@ Env:  AUDIOMASS_PORT (default 5055)
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -57,6 +58,13 @@ from utils.validation import (                       # noqa: E402
 
 
 PORT = int(os.environ.get("AUDIOMASS_PORT", "5055"))
+
+# --- Tempo segment endpoint (fast BPM scan on the first ~180s) ------------
+TEMPO_SLICE_SEC = 180
+TEMPO_SAMPLE_RATE = 22050
+TEMPO_POST_MAX_BYTES = 8 * 1024 * 1024  # client sends the first ~8MB of the blob
+TEMPO_CACHE_DIR = Path(tempfile.gettempdir()) / "am-tempo-cache"
+
 HOST = "0.0.0.0"
 
 # Extension -> MIME for static serving (SimpleHTTPRequestHandler covers most,
@@ -172,6 +180,105 @@ class AudioMassHandler(BaseHTTPRequestHandler):
         self._send_cors()
         self.send_header("Content-Length", "0")
         self.end_headers()
+
+    # ----- tempo segment: first-180s mono WAV for the fast BPM scan -----
+    def _slice_tempo_wav(self, src_path=None, raw_head=None):
+        """Slice the first ~180s of audio to a mono 22050 Hz WAV via ffmpeg.
+
+        src_path: server-side file (GET path). raw_head: raw byte head of a
+        client blob (POST path, may be truncated mid-stream -- ffmpeg decodes
+        the complete frames it can). Returns bytes, or None when ffmpeg is
+        missing or the slice failed.
+        """
+        cache = None
+        if src_path is not None:
+            try:
+                st = src_path.stat()
+                key = hashlib.sha1(
+                    f"{src_path}:{st.st_mtime_ns}:{st.st_size}".encode()
+                ).hexdigest()
+                cache = TEMPO_CACHE_DIR / f"{key}.wav"
+                if cache.exists():
+                    return cache.read_bytes()
+            except OSError:
+                return None
+        cmd = [
+            "ffmpeg", "-v", "error", "-nostdin",
+            "-i", str(src_path) if src_path is not None else "pipe:0",
+            "-t", str(TEMPO_SLICE_SEC),
+            "-ac", "1", "-ar", str(TEMPO_SAMPLE_RATE),
+            "-f", "wav", "-",
+        ]
+        try:
+            proc = subprocess.run(
+                cmd,
+                input=raw_head if raw_head is not None else None,
+                capture_output=True,
+                timeout=120,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if proc.returncode != 0 or not proc.stdout:
+            return None
+        if cache is not None:
+            try:
+                TEMPO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+                cache.write_bytes(proc.stdout)
+            except OSError:
+                pass
+        return proc.stdout
+
+    def handle_tempo_segment_get(self, qs):
+        files = qs.get("file")
+        if not files or not files[0]:
+            self._send_error_json(400, "Missing file param")
+            return
+        rel = files[0].lstrip("/")
+        fs_path = (SRC_DIR / rel).resolve()
+        try:
+            fs_path.relative_to(SRC_DIR)
+        except ValueError:
+            self._send_error_json(403, "Forbidden")
+            return
+        if not fs_path.exists() or not fs_path.is_file():
+            self._send_error_json(404, "File not found")
+            return
+        wav = self._slice_tempo_wav(src_path=fs_path)
+        if wav is None:
+            self._send_error_json(500, "Tempo segment unavailable (ffmpeg?)")
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "audio/wav")
+        self.send_header("Content-Length", str(len(wav)))
+        self.send_header("Cache-Control", "private, max-age=3600")
+        self._send_cors()
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(wav)
+
+    def handle_tempo_segment_post(self):
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            length = 0
+        if length <= 0 or length > TEMPO_POST_MAX_BYTES:
+            self._send_error_json(400, "Bad body size")
+            return
+        raw = self.rfile.read(length)
+        if not raw:
+            self._send_error_json(400, "Empty body")
+            return
+        wav = self._slice_tempo_wav(raw_head=raw)
+        if wav is None:
+            self._send_error_json(500, "Tempo segment unavailable (ffmpeg?)")
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "audio/wav")
+        self.send_header("Content-Length", str(len(wav)))
+        self._send_cors()
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(wav)
 
     # ----- entry points -----
     def do_OPTIONS(self):
@@ -372,6 +479,10 @@ class AudioMassHandler(BaseHTTPRequestHandler):
             })
             return
 
+        # /api/tempo-segment -> first-180s mono WAV (fast BPM scan)
+        if path == "/api/tempo-segment":
+            self.handle_tempo_segment_get(qs)
+            return
         self._send_error_json(404, "Not Found")
 
     def route_api_post(self):
@@ -399,6 +510,9 @@ class AudioMassHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"job_id": m.group(1), "status": "cancel_requested"})
             return
 
+        if path == "/api/tempo-segment":
+            self.handle_tempo_segment_post()
+            return
         self._send_error_json(404, "Not Found")
 
     def route_api_delete(self):

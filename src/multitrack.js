@@ -41,6 +41,7 @@
 		var mt_extras_panel = null;
 		var mt_extras_tab = null;
 		var mt_erase_mode = false;
+		var mt_pencil_mode = false;
 		var raf = 0;
 		var play_sync = 0;
 		var render_raf = 0;
@@ -270,6 +271,10 @@
 				if (tracks[i].id === id) return track_colors[i % track_colors.length];
 			return track_colors[0];
 		}
+		function hexA ( hex, a ) {
+			var n = parseInt (hex.slice (1), 16);
+			return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')'
+		}
 
 		function cloneState () {
 			return {
@@ -308,6 +313,7 @@
 						out: c.out,
 						fi: c.fi || 0,
 						fo: c.fo || 0,
+						ftype: c.ftype === 'lin' ? 'lin' : 'quad',
 						name: c.name,
 						buffer: c.buffer
 					};
@@ -364,6 +370,7 @@
 					out: c.out,
 					fi: c.fi || 0,
 					fo: c.fo || 0,
+					ftype: c.ftype === 'lin' ? 'lin' : 'quad',
 					name: c.name,
 					buffer: c.buffer
 				};
@@ -942,6 +949,7 @@
 		function Toggle ( force ) {
 		on = force === undefined ? !IsOn () : !!force;
 		app.el.classList[on ? 'add' : 'remove'] ('pk_mt_on');
+		updateBpmBadge ();
 		if (btn_toggle) btn_toggle.classList[on ? 'add' : 'remove'] ('pk_act');
 
 		// Attach mixer button on first toggle on
@@ -1377,6 +1385,12 @@
 				selected_track = tid;
 				addFiles ( e.dataTransfer.files, tid, timeFromEvent ( e ) );
 			}, false);
+			lane.addEventListener ('mousedown', function ( e ) {
+				if (!mt_pencil_mode) return ;
+				e.preventDefault ();
+				e.stopPropagation ();
+				startPencilDrag ( e, this.getAttribute ('data-track') );
+			}, false);
 			lanes.appendChild ( lane );
 			lane_by_track[track.id] = lane;
 		}
@@ -1467,32 +1481,51 @@
 		}
 
 		function updateBpmBadge () {
-			if (!bpm_known) {
+			if (!bpm_known || app.el.classList.contains ('pk_mt_on')) {
 				if (bpm_badge && bpm_badge.parentNode)
 					bpm_badge.parentNode.removeChild ( bpm_badge );
 				bpm_badge = null;
 				return ;
 			}
-			var host = app.el.getElementsByClassName ('pk_av_cont')[0] || app.el;
+			var host = app.el.getElementsByClassName ('pk_tb')[0] || app.el;
 			if (!host) return ;
 			if (!bpm_badge || bpm_badge.parentNode !== host) {
 				bpm_badge = d.createElement ('div');
 				bpm_badge.className = 'pk_bpm_info';
-				bpm_badge.style.position = 'absolute';
-				bpm_badge.style.right = '14px';
-				bpm_badge.style.top = '8px';
-				bpm_badge.style.zIndex = '4';
+				bpm_badge.style.display = 'inline-flex';
+			bpm_badge.style.alignItems = 'center';
+				bpm_badge.style.marginLeft = '12px';
+				bpm_badge.style.verticalAlign = 'middle';
 				bpm_badge.style.pointerEvents = 'none';
-				bpm_badge.style.font = '12px/1 var(--ff-mono)';
+				bpm_badge.style.font = '600 13px/1 var(--ff-mono)';
 				bpm_badge.style.color = '#f0d878';
-				bpm_badge.style.background = 'rgba(10,12,14,.72)';
-				bpm_badge.style.border = '1px solid rgba(240,216,120,.45)';
-				bpm_badge.style.borderRadius = '3px';
-				bpm_badge.style.padding = '3px 8px';
+				bpm_badge.style.background = 'rgba(8,10,12,.85)';
+				bpm_badge.style.border = '1px solid rgba(240,216,120,.7)';
+				bpm_badge.style.borderRadius = '4px';
+				bpm_badge.style.padding = '5px 10px';
 				bpm_badge.style.letterSpacing = '.5px';
 				host.appendChild ( bpm_badge );
 			}
-			bpm_badge.textContent = '♪ ' + Math.round (badge_bpm) + ' BPM' + (beat_key ? ' · ' + beat_key : '') + (bpm_auto ? ' · auto' : '');
+			var nm = app.engine && app.engine.file_name ? app.engine.file_name : '';
+		bpm_badge.textContent = '';
+		if (nm) {
+			var _nm = d.createElement ('span');
+			_nm.style.overflow = 'hidden';
+			_nm.style.textOverflow = 'ellipsis';
+			_nm.style.whiteSpace = 'nowrap';
+			_nm.style.maxWidth = '220px';
+			_nm.style.flex = '0 1 auto';
+			_nm.style.minWidth = '0';
+			_nm.textContent = nm;
+			_nm.title = nm;
+			bpm_badge.appendChild (_nm);
+		}
+		var _info = d.createElement ('span');
+		_info.style.whiteSpace = 'nowrap';
+		_info.style.flex = '0 0 auto';
+		_info.style.marginLeft = (nm ? '8px' : '0');
+		_info.textContent = '♪ ' + Math.round (badge_bpm) + ' BPM' + (beat_key ? ' · ' + beat_key : '') + (bpm_auto ? ' · auto' : '');
+		bpm_badge.appendChild (_info);
 		}
 
 		function beatStep () {
@@ -1990,8 +2023,8 @@
 			var fi = Math.min (clip.fi || 0, len);
 			var fo = Math.min (clip.fo || 0, len - fi);
 
-			if (fi && pos < fi) gain *= fadeGain (pos / fi);
-			if (fo && pos > len - fo) gain *= fadeGain ((len - pos) / fo);
+			if (fi && pos < fi) gain *= fadeGain (pos / fi, clip.ftype);
+			if (fo && pos > len - fo) gain *= fadeGain ((len - pos) / fo, clip.ftype);
 			return gain;
 		}
 
@@ -2030,6 +2063,23 @@
 		function clampClipFades ( clip ) {
 			setClipFade ( clip, 1, clip.fi || 0 );
 			setClipFade ( clip, 0, clip.fo || 0 );
+		}
+		function toggleFadeCurve ( clip ) {
+			var next = (clip.ftype === 'lin') ? 'quad' : 'lin';
+			var prev = cloneState ();
+			var targets = 0;
+			for (var i = 0; i < clips.length; ++i) {
+				if (clips[i] === clip || selected_clips[clips[i].id]) {
+					clips[i].ftype = next;
+					++targets;
+				}
+			}
+			if (targets) {
+				pushState ( prev, (next === 'lin' ? 'Linear' : 'Quadratic') + ' Fade Curve' );
+				queuePlayRefresh ( true );
+				render ();
+			}
+			return true;
 		}
 
 		function toggleXfade () {
@@ -2100,6 +2150,7 @@
 			ce.style.width = cw + 'px';
 			ce.style.height = ch + 'px';
 			ce.style.setProperty ('--mt-bg', tc[0]);
+			ce.style.setProperty ('--mt-bg-a', hexA (tc[0], 0.5));
 			ce.style.setProperty ('--mt-br', tc[2]);
 
 			var label = d.createElement ('span');
@@ -2382,10 +2433,13 @@
 		mt_context.addOption ('Fade Out', function () {
 				doContextClip (function () { applyFx ('FadeOut'); });
 			}, false);
+			mt_context.addOption ('Fade Curve: Quadratic', function () {
+				doContextClip ( toggleFadeCurve );
+			}, false);
 			mt_context.addOption ('Silence Clip', function () {
 				doContextClip (function () { silenceClipAudio (); });
 			}, false);
-			mt_context.addOption ('---', function () {}, true);
+			mt_context.addOption ('---', function () {}, '---');
 			mt_context.addOption ('Stretch to BPM…', function () {
 				doContextClip (function (clip) { stretchClipToBPM (clip); });
 			}, false);
@@ -2395,8 +2449,14 @@
 			mt_context.onOpen = function ( menu, div ) {
 				var a = div.childNodes;
 				var x = xfadeState ( context_clip );
-				a[6].innerHTML = x === 2 ? 'Turn Crossfade Off' : 'Turn Crossfade On';
-				a[6].className = 'pk_ctx_action' + (x ? '' : ' pk_inact');
+				for (var i = 0; i < menu.options.length; ++i) {
+					if (menu.options[i].name === 'Crossfade') {
+						a[i].innerHTML = x === 2 ? 'Turn Crossfade Off' : 'Turn Crossfade On';
+						a[i].className = 'pk_ctx_action' + (x ? '' : ' pk_inact');
+					} else if (menu.options[i].name === 'Fade Curve: Quadratic') {
+						a[i].innerHTML = 'Fade Curve: ' + ((context_clip && context_clip.ftype === 'lin') ? 'Linear' : 'Quadratic');
+					}
+				}
 				Pause ();
 			};
 
@@ -2612,6 +2672,15 @@
 			}
 		}
 
+		function fadeCurvePath ( ctx, x0, y0, x1, y1, type ) {
+			var steps = 8;
+			ctx.moveTo (x0, y0);
+			for (var i = 1; i <= steps; ++i) {
+				var p = i / steps;
+				var g = fadeGain (p, type);
+				ctx.lineTo (x0 + (x1 - x0) * p, y0 + (y1 - y0) * (1 - g));
+			}
+		}
 		function drawClipFades ( ctx, clip, wdt, hgt ) {
 			var dur = clipLen ( clip );
 			if (dur <= 0 || !(clip.fi || clip.fo)) return ;
@@ -2621,27 +2690,23 @@
 			ctx.fillStyle = 'rgba(240,216,120,.08)';
 			if (fi > 1) {
 				ctx.beginPath ();
-				ctx.moveTo (0, hgt);
-				ctx.lineTo (fi, 0);
+				fadeCurvePath ( ctx, 0, hgt, fi, 0, clip.ftype );
 				ctx.lineTo (fi, hgt);
 				ctx.closePath ();
 				ctx.fill ();
 				ctx.beginPath ();
-				ctx.moveTo (0, hgt);
-				ctx.lineTo (fi, 0);
+				fadeCurvePath ( ctx, 0, hgt, fi, 0, clip.ftype );
 				ctx.stroke ();
 			}
 			if (fo > 1) {
 				var x = wdt - fo;
 				ctx.beginPath ();
-				ctx.moveTo (x, 0);
-				ctx.lineTo (wdt, hgt);
+				fadeCurvePath ( ctx, x, 0, wdt, hgt, clip.ftype );
 				ctx.lineTo (x, hgt);
 				ctx.closePath ();
 				ctx.fill ();
 				ctx.beginPath ();
-				ctx.moveTo (x, 0);
-				ctx.lineTo (wdt, hgt);
+				fadeCurvePath ( ctx, x, 0, wdt, hgt, clip.ftype );
 				ctx.stroke ();
 			}
 		}
@@ -2656,9 +2721,8 @@
 			canvas.width = wdt;
 			canvas.height = hgt;
 
-			var ctx = canvas.getContext ('2d', {alpha:false});
-			ctx.fillStyle = tone[0];
-			ctx.fillRect (0, 0, wdt, hgt);
+			var ctx = canvas.getContext ('2d', {alpha:true});
+			ctx.clearRect (0, 0, wdt, hgt);
 			ctx.fillStyle = tone[1];
 
 			var data = buffer.getChannelData (0);
@@ -2804,6 +2868,11 @@
 			var stick_edge = 0;
 
 			bindDown ( ce, function ( e ) {
+				if (mt_pencil_mode) {
+					e.preventDefault ();
+					e.stopPropagation ();
+					return startPencilDrag ( e, clip.track );
+				}
 				if (e._touch && selected_clip !== clip.id) {
 					return startClipTouchSelect ( e, clip );
 				}
@@ -4067,6 +4136,8 @@
 			var old_out = clipOut ( clip );
 			var new_len = old_len;
 			var fx_val = val;
+			if (name === 'FadeIn' || name === 'FadeOut')
+				fx_val = clip.ftype || 'quad';
 			var Ctx = w.OfflineAudioContext || w.webkitOfflineAudioContext;
 			if (name === 'Speed' || name === 'Rate')
 				new_len = Math.max (1, (old_len / Math.max (0.001, val)) >> 0);
@@ -5860,6 +5931,9 @@
 				mt_extras_tab.appendChild (btnLoops);
 				mt_extras_tab.appendChild (btnSlicer);
 				mt_extras_tab.appendChild (btnEraser);
+				var btnPencil = makeButton ('✎', 'Pencil — click deletes clip, drag erases range (region-clamped)', false, 'pk_btn pk_mtbeat_btn pk_mt_ext_btn');
+				btnPencil.onclick = function () { togglePencilMode (); };
+				mt_extras_tab.appendChild (btnPencil);
 				beat_bar.appendChild (mt_extras_tab);
 			}
 		}
@@ -6013,20 +6087,35 @@
 
 		// ── Eraser Mode ──────────────────────────────────
 
-		function toggleEraseMode () {
-			mt_erase_mode = !mt_erase_mode;
-			// update button style
+		function updateToolButtons () {
 			var btns = mt_extras_tab ? mt_extras_tab.querySelectorAll ('.pk_mt_ext_btn') : [];
 			for (var i = 0; i < btns.length; i++) {
-				if (btns[i].textContent.indexOf ('✕') >= 0) {
-					if (mt_erase_mode) btns[i].classList.add ('pk_act');
-					else btns[i].classList.remove ('pk_act');
-				}
+				var t = btns[i].textContent;
+				var on = (t.indexOf ('✕') >= 0 && mt_erase_mode) ||
+					(t.indexOf ('✎') >= 0 && mt_pencil_mode);
+				btns[i].classList[on ? 'add' : 'remove'] ('pk_act');
 			}
-			// change cursor on lanes
+		}
+
+		function updateToolCursor () {
 			var lanes = document.querySelector ('.pk_mt_lanes');
-			if (lanes) lanes.style.cursor = mt_erase_mode ? 'crosshair' : '';
+			if (lanes) lanes.style.cursor = (mt_erase_mode || mt_pencil_mode) ? 'crosshair' : '';
+		}
+
+		function toggleEraseMode () {
+			mt_erase_mode = !mt_erase_mode;
+			if (mt_erase_mode) mt_pencil_mode = false;
+			updateToolButtons ();
+			updateToolCursor ();
 			OneUp (mt_erase_mode ? 'Eraser ON — click clip to delete' : 'Eraser OFF', 1000);
+		}
+
+		function togglePencilMode () {
+			mt_pencil_mode = !mt_pencil_mode;
+			if (mt_pencil_mode) mt_erase_mode = false;
+			updateToolButtons ();
+			updateToolCursor ();
+			OneUp (mt_pencil_mode ? 'Pencil ON — click deletes clip, drag erases range (region-clamped)' : 'Pencil OFF', 1200);
 		}
 
 		// hook into clip click — if erase mode, delete instead of select
@@ -6044,8 +6133,171 @@
 			if (selected_clip === clip_id) selected_clip = null;
 			publishDuration ();
 			render ();
-			registerUndo ('Erase Clip', prev);
+			pushState ( prev, 'Erase Clip' );
 			return true;
+		}
+
+		// ── Pencil Mode ──────────────────────────────────
+		// Click deletes the clip(s) under the cursor on the current track;
+		// drag erases the covered range (removing, trimming, or splitting clips).
+		// Both are clamped to the loop/selection region when one exists, and
+		// stacked (overlapping) clips are all affected.
+
+		function splitClipAt ( clip, at ) {
+			var rel = at - clip.start;
+			var len = clipLen ( clip );
+			if (rel <= 0.005 || rel >= len - 0.005) return null;
+			var split = clipIn ( clip ) + rel;
+			var right = {
+				id: 'mc' + (clip_uid++),
+				track: clip.track,
+				start: at,
+				in: split,
+				out: clipOut ( clip ),
+				fi: 0,
+				fo: clip.fo || 0,
+				name: clip.name,
+				buffer: clip.buffer
+			};
+			clip.out = split;
+			clip.fo = 0;
+			clampClipFades ( clip );
+			clampClipFades ( right );
+			clips.splice ( clips.indexOf ( clip ) + 1, 0, right );
+			return right;
+		}
+
+		function pencilBounds ( a, b ) {
+			if (region) {
+				a = Math.max ( a, region.start );
+				b = Math.min ( b, region.end );
+			}
+			return { a: a, b: b };
+		}
+
+		function pencilEraseClick ( track_id, at ) {
+			var prev = cloneState ();
+			var changed = false;
+			for (var i = clips.length - 1; i >= 0; --i) {
+				var clip = clips[i];
+				if (clip.track !== track_id) continue;
+				var cs = clip.start;
+				var ce = cs + clipLen ( clip );
+				if (at < cs || at >= ce) continue;
+				var bd = pencilBounds ( cs, ce );
+				var ra = bd.a, rb = bd.b;
+				if (rb - ra < 0.005) continue;
+				if (ra <= cs + 0.005 && rb >= ce - 0.005) {
+					clips.splice ( i, 1 );
+					delete selected_clips[clip.id];
+					if (selected_clip === clip.id) selected_clip = null;
+				} else if (ra <= cs + 0.005) {
+					clip.in = clipIn ( clip ) + ( rb - cs );
+					clip.start = rb;
+					clampClipFades ( clip );
+				} else if (rb >= ce - 0.005) {
+					clip.out = clipOut ( clip ) - ( ce - ra );
+					clampClipFades ( clip );
+				} else {
+					splitClipAt ( clip, rb );
+					clip.out = clipOut ( clip ) - ( rb - ra );
+					clampClipFades ( clip );
+				}
+				changed = true;
+			}
+			if (!changed) return false;
+			publishDuration ();
+			render ();
+			queuePlayRefresh ( true );
+			app.fireEvent ('DidUpdateMultitrack');
+			pushState ( prev, 'Pencil Erase' );
+			OneUp ('Pencil — deleted', 800);
+			return true;
+		}
+
+		function pencilErase ( track_id, a, b ) {
+			var bd = pencilBounds ( a, b );
+			a = bd.a; b = bd.b;
+			if (b - a < 0.005) return false;
+			var prev = cloneState ();
+			var changed = false;
+			for (var i = clips.length - 1; i >= 0; --i) {
+				var clip = clips[i];
+				if (clip.track !== track_id) continue;
+				var cs = clip.start;
+				var ce = cs + clipLen ( clip );
+				var aa = Math.max ( a, cs );
+				var bb = Math.min ( b, ce );
+				if (bb - aa < 0.005) continue;
+				var coversStart = aa - cs <= 0.005;
+				var coversEnd = ce - bb <= 0.005;
+				if (coversStart && coversEnd) {
+					clips.splice ( i, 1 );
+					delete selected_clips[clip.id];
+					if (selected_clip === clip.id) selected_clip = null;
+					changed = true;
+					continue;
+				}
+				if (coversStart) {
+					clip.in = clipIn ( clip ) + ( bb - cs );
+					clip.start = bb;
+					clampClipFades ( clip );
+					changed = true;
+					continue;
+				}
+				if (coversEnd) {
+					clip.out = clipOut ( clip ) - ( ce - aa );
+					clampClipFades ( clip );
+					changed = true;
+					continue;
+				}
+				splitClipAt ( clip, bb );
+				clip.out = clipOut ( clip ) - ( bb - aa );
+				clampClipFades ( clip );
+				changed = true;
+			}
+			if (!changed) return false;
+			publishDuration ();
+			render ();
+			queuePlayRefresh ( true );
+			app.fireEvent ('DidUpdateMultitrack');
+			pushState ( prev, 'Pencil Erase' );
+			OneUp ('Pencil — erased range', 800);
+			return true;
+		}
+
+		function startPencilDrag ( e, track_id ) {
+			var start_t = timeFromEvent ( e );
+			var lanes = document.querySelector ('.pk_mt_lanes');
+			var ov = d.createElement ('div');
+			ov.className = 'pk_mt_pencil_ov';
+			var lane = lane_by_track[track_id];
+			if (lane) {
+				ov.style.top = ((lane.offsetTop + 2) >> 0) + 'px';
+				ov.style.height = Math.max (30, (lane.offsetHeight - 4) >> 0) + 'px';
+			}
+			if (lanes) lanes.appendChild ( ov );
+
+			function move ( ev ) {
+				var t = timeFromEvent ( ev );
+				var a = Math.min ( start_t, t );
+				var b = Math.max ( start_t, t );
+				ov.style.left = ((a * px_per_sec) >> 0) + 'px';
+				ov.style.width = Math.max (4, ((b - a) * px_per_sec) >> 0) + 'px';
+			}
+			function up ( ev ) {
+				document.removeEventListener ('mousemove', move);
+				document.removeEventListener ('mouseup', up);
+				if (ov.parentNode) ov.parentNode.removeChild ( ov );
+				var t = timeFromEvent ( ev || e );
+				var a = Math.min ( start_t, t );
+				var b = Math.max ( start_t, t );
+				if (b - a < 0.02) pencilEraseClick ( track_id, (a + b) / 2 );
+				else pencilErase ( track_id, a, b );
+			}
+			document.addEventListener ('mousemove', move, false);
+			document.addEventListener ('mouseup', up, false);
+			move ( e );
 		}
 
 		// silence clip audio (zero out the buffer)
@@ -6062,7 +6314,7 @@
 			}
 			clip.buffer = newBuf;
 			render ();
-			registerUndo ('Silence Clip', prev);
+			pushState ( prev, 'Silence Clip' );
 			OneUp ('Clip silenced', 800);
 		}
 

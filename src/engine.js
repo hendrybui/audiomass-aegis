@@ -59,6 +59,7 @@
 		};
 
 		this.LoadArrayBuffer = function ( e ) {
+			if (e && e.name) q.file_name = e.name;
 			var func = function () {
 				app.listenFor ('RequestCancelModal', function() {
 					wavesurfer.cancelBufferLoad ();
@@ -75,7 +76,10 @@
 
 				app.fireEvent ('WillDownloadFile');
 				q.is_ready = false;
+				tempo_source_blob = e;
+				tempo_source_name = (e && e.name) ? e.name : (q.file_name || '');
 				wavesurfer.loadBlob( e );
+				quickScanTempo ();
 				app.fireEvent ('DidUnloadFile');
 
 				wavesurfer.regions && wavesurfer.regions.clear();
@@ -190,6 +194,7 @@
 		this.LoadFile = function ( e ) {
 			if (e.files.length > 0)
 			{
+				if (e.files[0] && e.files[0].name) q.file_name = e.files[0].name;
 				if (e.files[0].type == "audio/mp3"
 					|| e.files[0].type == "audio/wave"
 					|| e.files[0].type == "audio/mpeg"
@@ -215,7 +220,10 @@
 
 									app.fireEvent ('WillDownloadFile');
 									q.is_ready = false;
+									tempo_source_blob = e.files[0];
+									tempo_source_name = (e.files[0] && e.files[0].name) ? e.files[0].name : (q.file_name || '');
 									wavesurfer.loadBlob( e.files[0] );
+									quickScanTempo ();
 									app.fireEvent ('DidUnloadFile');
 									wavesurfer.regions && wavesurfer.regions.clear();
 							};
@@ -331,6 +339,7 @@
 			}
 		}
 		this.LoadSample = function () {
+			q.file_name = 'test.mp3';
 			app.fireEvent ('WillDownloadFile');
 
 			setTimeout(function () {
@@ -350,7 +359,10 @@
 
 				app.fireEvent ('RequestZoomUI', 0);
 				q.is_ready = false;
+				tempo_source_blob = null;
+				tempo_source_name = 'test.mp3';
 				wavesurfer.load ('test.mp3');
+				quickScanTempo ();
 			}, 180);
 		}
 		this.LoadURL = function ( url ) {
@@ -458,7 +470,12 @@
 					}
 				});
 
+				tempo_source_blob = null;
+				try {
+					tempo_source_name = (new URL (url, location.href).origin === location.origin) ? String (url).split ('?')[0].replace (/^\/+/, '') : '';
+				} catch (e3) { tempo_source_name = ''; }
 				wavesurfer.load ( url );
+				quickScanTempo ();
 				q.is_ready = false;
 			}, 180);
 		}
@@ -472,6 +489,10 @@
 		// --- auto BPM detection: scan the loaded song and match the beat grid ---
 		var tempo_job = 0;
 		var tempo_worker = null;
+		var tempo_done_fast = false;
+		var tempo_fast_name = '';
+		var tempo_source_blob = null;
+		var tempo_source_name = '';
 
 		function trimmedTempoBuffer ( buffer, max_sec ) {
 			var len = Math.min (buffer.length, Math.max (1, Math.floor ((max_sec || 180) * buffer.sampleRate)));
@@ -525,14 +546,7 @@
 			app.loadScript ('tempo-estimator.js?v=mt5', run, function () {});
 		}
 
-		function autoDetectTempo () {
-			var buffer = wavesurfer.backend && wavesurfer.backend.buffer;
-			if (!buffer || !buffer.length) return ;
-			var job = ++tempo_job;
-			if (tempo_worker) {
-				tempo_worker.terminate ();
-				tempo_worker = null;
-			}
+		function scheduleTempoEstimate ( buffer, job ) {
 			if (!w.Worker) { runMainTempo (buffer, job); return ; }
 			var payload = null;
 			try { payload = packTempoPayload (buffer, 180); }
@@ -551,6 +565,46 @@
 				runMainTempo (buffer, job);
 			};
 			tempo_worker.postMessage ({ type: 'estimate', id: job, buffer: payload.data }, payload.transfer);
+		}
+		function autoDetectTempo () {
+			var nm = q.file_name || '';
+			if (tempo_done_fast && nm === tempo_fast_name) return ;
+			tempo_done_fast = false;
+			var buffer = wavesurfer.backend && wavesurfer.backend.buffer;
+			if (!buffer || !buffer.length) return ;
+			var job = ++tempo_job;
+			if (tempo_worker) { tempo_worker.terminate (); tempo_worker = null; }
+			scheduleTempoEstimate (buffer, job);
+		}
+		function quickScanTempo () {
+			tempo_done_fast = false;
+			var job = ++tempo_job;
+			if (tempo_worker) { tempo_worker.terminate (); tempo_worker = null; }
+			var req = null;
+			try {
+				if (tempo_source_blob) {
+					req = fetch ('/api/tempo-segment', { method: 'POST', body: tempo_source_blob.slice (0, 8 * 1024 * 1024) });
+				} else if (tempo_source_name) {
+					req = fetch ('/api/tempo-segment?file=' + encodeURIComponent (tempo_source_name));
+				} else {
+					return ;
+				}
+			} catch (e) { return ; }
+			req.then (function ( r ) {
+				if (!r.ok) throw new Error ('tempo segment ' + r.status);
+				return r.arrayBuffer ();
+			}).then (function ( buf ) {
+				var ac = (wavesurfer.backend && wavesurfer.backend.ac) || new AudioContext ();
+				return ac.decodeAudioData (buf);
+			}).then (function ( seg ) {
+				if (job !== tempo_job) return ;
+				tempo_done_fast = true;
+				tempo_fast_name = tempo_source_name || q.file_name || '';
+				scheduleTempoEstimate (seg, job);
+			}).catch (function () {
+				// Quick path unavailable (offline / server down / non-server file).
+				// The ready-time scan still runs via autoDetectTempo.
+			});
 		}
 
 		wavesurfer.on ('ready', function () {

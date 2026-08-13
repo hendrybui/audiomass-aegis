@@ -647,10 +647,11 @@ a{
 	border-bottom:1px solid #1a1a1a;
 }
 .pk_mt_lane.pk_mt_sel{background:#1a2122}
+.pk_mt_pencil_ov{position:absolute;left:0;top:0;background:rgba(120,200,255,.28);border:1px solid rgba(120,200,255,.9);pointer-events:none;z-index:4}
 
 .pk_mt_clip{
 	position:absolute;top:8px;height:60px;min-width:36px;
-	background:var(--mt-bg,#0a1414);
+	background:var(--mt-bg-a, rgba(10,20,20,.5));
 	border:1px solid var(--mt-br,#2f7b75);border-radius:var(--r-md);
 	box-shadow:inset 0 1px 0 rgba(255,255,255,.06);
 	overflow:hidden;contain:content;cursor:default;z-index:2;

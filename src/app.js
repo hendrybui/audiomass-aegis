@@ -80,9 +80,9 @@
 			return Math.max (0.2, Math.min (5, Math.pow (1.0025, -delta)));
 		};
 
-		q.fadeGain = function ( p ) {
+		q.fadeGain = function ( p, type ) {
 			p = p < 0 ? 0 : (p > 1 ? 1 : p);
-			return p * p;
+			return type === 'lin' ? p : p * p;
 		};
 
 		var scripts = {};

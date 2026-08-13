@@ -973,12 +973,12 @@
 			this.PreviewUpdate && this.PreviewUpdate ( this.PreviewFilter, audio_ctx, val, this.PreviewSource );
 		}
 
-		function fadeCurve ( rev ) {
+		function fadeCurve ( rev, type ) {
 			var c = new Float32Array (32);
 			var i = 32, p;
 			while (i--) {
 				p = i / 31;
-				c[i] = fadeGain (rev ? 1 - p : p);
+				c[i] = fadeGain (rev ? 1 - p : p, type);
 			}
 			return c;
 		}
@@ -1186,7 +1186,7 @@
 					filter : function ( audio_ctx, destination, source, duration ) {
 						var gain = audio_ctx.createGain ();
 						gain.gain.setValueAtTime (0, audio_ctx.currentTime);
-						gain.gain.setValueCurveAtTime (fadeCurve (), audio_ctx.currentTime, duration || 0.001);
+						gain.gain.setValueCurveAtTime (fadeCurve (0, val), audio_ctx.currentTime, duration || 0.001);
 						gain.connect (destination);
 						source.connect (gain);
 
@@ -1200,7 +1200,7 @@
 					filter : function ( audio_ctx, destination, source, duration ) {
 						var gain = audio_ctx.createGain ();
 						gain.gain.setValueAtTime (1, audio_ctx.currentTime);
-						gain.gain.setValueCurveAtTime (fadeCurve (1), audio_ctx.currentTime, duration || 0.001);
+						gain.gain.setValueCurveAtTime (fadeCurve (1, val), audio_ctx.currentTime, duration || 0.001);
 						gain.connect (destination);
 						source.connect (gain);
 
