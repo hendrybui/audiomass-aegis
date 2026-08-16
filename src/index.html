@@ -5,6 +5,26 @@
 	<link href="ico.png" rel="shortcut icon">
 	<meta charset="utf-8" />
 	<link rel="manifest" href="manifest.json">
+	<script>
+		// Hard kill-switch: this fork serves files directly from src/ and bumps
+		// assets with ?v= query strings. A leftover cache-first service worker
+		// (ignoreSearch) would serve a stale app shell forever and defeat the
+		// versioning, so unregister any worker and delete its caches on every load.
+		if ('serviceWorker' in navigator) {
+			try {
+				navigator.serviceWorker.getRegistrations().then(function ( regs ) {
+					regs.forEach(function ( r ) { r.unregister(); });
+				});
+			} catch ( error ) {}
+		}
+		if (window.caches && window.caches.keys) {
+			try {
+				caches.keys().then(function ( keys ) {
+					keys.forEach(function ( k ) { caches.delete( k ); });
+				});
+			} catch ( error ) {}
+		}
+	</script>
 
 	<meta http-equiv="X-UA-Compatible" content="IE=edge" />
 	<meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, user-scalable=no">
@@ -38,16 +58,16 @@
 	<script src="dist/plugin/wavesurfer.regions.js"></script>
 	<script src="oneup.js"></script>
 
-	<script src="app.js?v=mt13"></script>
+	<script src="app.js?v=mt15"></script>
 	<script src="keys.js?v=mt3"></script>
 	<script src="markers.js?v=mt1"></script>
 	<script src="contextmenu.js?v=mt1"></script>
 	<script src="lufs.js?v=mt1"></script>
 	<script src="ui-fx.js?v=mt25"></script>
-	<script src="ui.js?v=mt24"></script>
+	<script src="ui.js?v=mt26"></script>
 	<script src="modal.js"></script>
 	<script src="state.js"></script>
-	<script src="engine.js?v=mt38"></script>
+	<script src="engine.js?v=mt40"></script>
 	<script src="actions.js?v=mt15"></script>
 	<script src="drag.js"></script>
 	<script src="recorder.js?v=mt1"></script>
@@ -59,8 +79,8 @@
 	<script src="id3.js"></script>
 	<script src="lzma.js"></script>
 	<script src="amss-format.js?v=mt2"></script>
-	<script src="multitrack.js?v=mt134"></script>
-	<script src="stems.js?v=2"></script>
+	<script src="multitrack.js?v=mt139"></script>
+	<script src="stems.js?v=5"></script>
 	<script>
 		var editor = PKAudioEditor.init ('app');
 		if ('serviceWorker' in navigator) {

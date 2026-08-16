@@ -66,6 +66,10 @@
 			return stemSettings;
 		};
 
+		q.getStemBuffers = function () {
+			return q.lastStemBuffers || null;
+		};
+
 		q.setStemSettings = function(newSettings) {
 			if (newSettings.selectedStems) stemSettings.selectedStems = newSettings.selectedStems;
 			if (newSettings.apiEndpoint) {
@@ -372,6 +376,39 @@
 		}
 
 		// ---- Load stems into multitrack ----
+		// Fetch and decode all stems for a job into {name: AudioBuffer}.
+		function fetchAndDecodeStems ( jobId, stemNames ) {
+			var mt = app.multitrack;
+			return Promise.all( stemNames.map( function ( stemName ) {
+				return fetch( API_BASE + '/jobs/' + jobId + '/stems/' + stemName + '?format=wav' )
+					.then( function ( r ) { return r.arrayBuffer(); } )
+					.then( function ( buf ) {
+						return new Promise( function ( resolve ) {
+							// use AudioMass's shared AudioContext
+							var ctx = mt && mt._getAudioCtx ? mt._getAudioCtx() : null;
+							if ( !ctx ) {
+								var wv = app.engine && app.engine.wavesurfer;
+								ctx = wv && wv.backend && wv.backend.ac;
+							}
+							if ( !ctx ) {
+								ctx = new (w.AudioContext || w.webkitAudioContext)();
+							}
+							ctx.decodeAudioData( buf, function ( audioBuffer ) {
+								resolve({ name: capitalize(stemName), buffer: audioBuffer });
+							}, function () {
+								resolve( null );
+							});
+						});
+					});
+			})).then( function ( results ) {
+				var stemsMap = {};
+				results.forEach( function ( r ) {
+					if ( r ) stemsMap[ r.name ] = r.buffer;
+				});
+				return stemsMap;
+			});
+		}
+
 		function loadStems ( jobId ) {
 			fetch( API_BASE + '/jobs/' + jobId + '/manifest' )
 				.then( function ( r ) { return r.json(); } )
@@ -390,35 +427,10 @@
 						mt.Toggle && mt.Toggle( true );
 					}
 
-					// fetch and decode all stems in parallel
-					var promises = stemNames.map( function ( stemName ) {
-						return fetch( API_BASE + '/jobs/' + jobId + '/stems/' + stemName + '?format=wav' )
-							.then( function ( r ) { return r.arrayBuffer(); } )
-							.then( function ( buf ) {
-								return new Promise( function ( resolve ) {
-									// use AudioMass's shared AudioContext
-									var ctx = mt._getAudioCtx ? mt._getAudioCtx() : null;
-									if ( !ctx ) {
-										var wv = app.engine && app.engine.wavesurfer;
-										ctx = wv && wv.backend && wv.backend.ac;
-									}
-									if ( !ctx ) {
-										ctx = new (w.AudioContext || w.webkitAudioContext)();
-									}
-									ctx.decodeAudioData( buf, function ( audioBuffer ) {
-										resolve({ name: capitalize(stemName), buffer: audioBuffer });
-									}, function () {
-										resolve( null );
-									});
-								});
-							});
-					});
-
-					Promise.all( promises ).then( function ( results ) {
-						var stemsMap = {};
-						results.forEach( function ( r ) {
-							if ( r ) stemsMap[ r.name ] = r.buffer;
-						});
+					return fetchAndDecodeStems( jobId, stemNames ).then( function ( stemsMap ) {
+						// Keep the decoded buffers for the Stem Waveform view
+						q.lastStemBuffers = stemsMap;
+						persistLastJob( jobId );
 
 						if ( mt && mt.AddStemsFromBuffers ) {
 							mt.AddStemsFromBuffers( stemsMap );
@@ -450,6 +462,76 @@
 			hideProgressModal();
 			separating = false;
 		}
+
+		// A newly loaded file invalidates stems retained for the Stem
+		// Waveform view (they belonged to the previous file).
+		app.listenFor('DidLoadFile', function () {
+			q.lastStemBuffers = null;
+		});
+
+		// ---- Persisted last-separation job (Stem Waveform restore) ----
+		// Remember which job produced stems for which file, so loading that
+		// same file again (e.g. after a page reload) can re-fetch the stem
+		// buffers from the jobs dir instead of re-running separation.
+		var JOB_KEY = 'audiomass_stem_last_job';
+		var restoreJobId = null;
+		var restoreSourceName = '';
+		try {
+			var savedJob = JSON.parse( w.localStorage.getItem( JOB_KEY ) || 'null' );
+			if ( savedJob && typeof savedJob.jobId === 'string' && savedJob.jobId ) {
+				restoreJobId = savedJob.jobId;
+				restoreSourceName = typeof savedJob.sourceName === 'string' ? savedJob.sourceName : '';
+			}
+		} catch ( e ) { /* ignore a corrupted entry */ }
+
+		function persistLastJob ( jobId ) {
+			try {
+				var sourceName = (app.engine && app.engine.file_name) || '';
+				w.localStorage.setItem( JOB_KEY, JSON.stringify({ jobId: jobId, sourceName: sourceName }) );
+				restoreJobId = jobId;
+				restoreSourceName = sourceName;
+			} catch ( e ) { /* storage unavailable */ }
+		}
+
+		function clearLastJob () {
+			restoreJobId = null;
+			restoreSourceName = '';
+			try { w.localStorage.removeItem( JOB_KEY ); } catch ( e ) {}
+		}
+
+		// Re-fetch the last separation's stems when its source file is loaded
+		// again, so the Stem Waveform view works after a reload. Registered
+		// after the invalidate listener above, so it runs last and wins.
+		app.listenFor('DidLoadFile', function () {
+			if ( !restoreJobId || separating ) return;
+			var loadedName = (app.engine && app.engine.file_name) || '';
+			if ( !loadedName || loadedName !== restoreSourceName ) return;
+
+			fetch( API_BASE + '/jobs/' + restoreJobId + '/manifest' )
+				.then( function ( r ) { if ( !r.ok ) throw new Error( 'job gone' ); return r.json(); } )
+				.then( function ( manifest ) {
+					var stemNames = manifest.selected_stems || manifest.available_stems || [];
+					if ( !stemNames.length ) { clearLastJob(); return; }
+					return fetchAndDecodeStems( restoreJobId, stemNames ).then( function ( stemsMap ) {
+						if ( !Object.keys( stemsMap ).length ) return;
+						q.lastStemBuffers = stemsMap;
+						// Also load the stems into the multitrack as tracks, so the
+						// file behaves exactly like a freshly separated one — the
+						// stems show up in MultiTrack with no extra steps. Skip if
+						// they're already there (e.g. separated this session).
+						var mt = app.multitrack;
+						if ( mt && mt.AddStemsFromBuffers ) {
+							var existing = mt.GetStemBuffers ? mt.GetStemBuffers() : null;
+							var already = existing && Object.keys( stemsMap ).every( function ( n ) {
+								return existing[ n ];
+							} );
+							if ( !already ) mt.AddStemsFromBuffers( stemsMap );
+						}
+						OneUp && OneUp( 'Stems restored for this track — see them in MultiTrack', 2800 );
+					});
+				})
+				.catch( function () { clearLastJob(); });
+		});
 
 		// ---- Main entry point ----
 		q.startSeparation = function () {

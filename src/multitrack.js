@@ -268,7 +268,7 @@
 
 		function trackColor ( id ) {
 			for (var i = 0; i < tracks.length; ++i)
-				if (tracks[i].id === id) return track_colors[i % track_colors.length];
+				if (tracks[i].id === id) return tracks[i].color || track_colors[i % track_colors.length];
 			return track_colors[0];
 		}
 		function hexA ( hex, a ) {
@@ -301,7 +301,9 @@
 						vol: t.vol,
 						pan: t.pan,
 						h: t.h || 1,
-						rec: t.rec
+						rec: t.rec,
+						color: t.color || null,
+						stem: !!t.stem
 					};
 				}),
 			clips: clips.map (function ( c ) {
@@ -358,7 +360,9 @@
 					vol: t.vol === undefined ? 1 : t.vol,
 					pan: t.pan || 0,
 					h: t.h || 1,
-					rec: !!t.rec
+					rec: !!t.rec,
+					color: t.color || null,
+					stem: !!t.stem
 				};
 			});
 			clips = state.clips.map (function ( c ) {
@@ -2732,6 +2736,31 @@
 			var step = Math.max (1, (len / wdt) >> 0);
 			var mid = hgt >> 1;
 
+			// Stem tracks autoscale to their own loudest peak so each stem's
+			// true shape shows (quiet stems aren't flat lines and loud stems
+			// don't all saturate into identical dense blocks).
+			var stem_norm = 1;
+			var trk = findTrack ( clip.track );
+			if (trk && trk.stem) {
+				var peak = 0;
+				if (step >= wave_peak_step) {
+					var ps = getWavePeaks ( buffer );
+					var pa0 = Math.max (0, (from / wave_peak_step) >> 0);
+					var pa1 = Math.min (ps.max.length - 1, ((to - 1) / wave_peak_step) >> 0);
+					for (var pi = pa0; pi <= pa1; ++pi) {
+						if (Math.abs (ps.max[pi]) > peak) peak = Math.abs (ps.max[pi]);
+						if (Math.abs (ps.min[pi]) > peak) peak = Math.abs (ps.min[pi]);
+					}
+				} else {
+					for (var si = from; si < to; si += 512) {
+						var sv = data[si] || 0;
+						if (sv < 0) sv = -sv;
+						if (sv > peak) peak = sv;
+					}
+				}
+				if (peak > 0.001) stem_norm = 1 / peak;
+			}
+
 			if (step >= wave_peak_step) {
 				var peaks = getWavePeaks ( buffer );
 				var peak_max = peaks.max;
@@ -2750,7 +2779,7 @@
 						if (peak_max[p] > max) max = peak_max[p];
 						if (peak_min[p] < min) min = peak_min[p];
 					}
-					ctx.fillRect (x, mid - (max * mid), 1, Math.max (1, (max - min) * mid));
+					ctx.fillRect (x, mid - (max * stem_norm * mid), 1, Math.max (1, (max - min) * stem_norm * mid));
 				}
 				drawClipFades ( ctx, clip, wdt, hgt );
 				return ;
@@ -2765,7 +2794,7 @@
 					if (v2 > max2) max2 = v2;
 					else if (v2 < min2) min2 = v2;
 				}
-				ctx.fillRect (x2, mid - (max2 * mid), 1, Math.max (1, (max2 - min2) * mid));
+				ctx.fillRect (x2, mid - (max2 * stem_norm * mid), 1, Math.max (1, (max2 - min2) * stem_norm * mid));
 			}
 			drawClipFades ( ctx, clip, wdt, hgt );
 		}
@@ -5730,6 +5759,19 @@
 		q.GetDuration = duration;
 		q.GetRegion = function () { return region; };
 		q.HasClips = hasClips;
+		q.GetStemBuffers = function () {
+			var map = {};
+			for (var i = 0; i < tracks.length; ++i) {
+				var track = tracks[i];
+				for (var j = 0; j < clips.length; ++j) {
+					if (clips[j].track !== track.id) continue;
+					if (clips[j].buffer) map[track.name] = clips[j].buffer;
+					break;
+				}
+			}
+			return Object.keys( map ).length ? map : null;
+		};
+		q.GetBeatBpm = function () { return beat_bpm || 120; };
 		q.Mixdown = Mixdown;
 		q.MixdownAsync = MixdownAsync;
 		q.DownloadAllStems = function ( baseName ) {
@@ -6659,11 +6701,24 @@
 		// Stem separation integration: add stems from decoded AudioBuffers
 		q.AddStemsFromBuffers = function ( stemsMap ) {
 			var prev = cloneState ();
+			// Distinct, recognizable colors per stem so the tracks are easy to
+			// tell apart at a glance (DAW-ish convention: pink vocals, orange
+			// drums, blue bass, purple guitar, cyan piano, green other).
+			var stemColors = {
+				'Vocals': ['#140a10', '#e91e63', '#8c1140'],
+				'Drums':  ['#140f08', '#ff9800', '#9a5c00'],
+				'Bass':   ['#0a1016', '#2196f3', '#11588f'],
+				'Guitar': ['#120a16', '#9c6ade', '#5c3a8f'],
+				'Piano':  ['#0a1416', '#26c6da', '#167a8f'],
+				'Other':  ['#0a140c', '#4caf50', '#2b6e30']
+			};
 			for ( var name in stemsMap ) {
 				if ( !stemsMap.hasOwnProperty( name ) ) continue;
 				addTrack ();
 				var newTrack = tracks[ tracks.length - 1 ];
 				newTrack.name = name;
+				newTrack.color = stemColors[ name ] || null;
+				newTrack.stem = true;
 				var clip = makeClip ( newTrack.id, 0, stemsMap[ name ], name );
 				clips.push ( clip );
 			}
