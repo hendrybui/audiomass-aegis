@@ -52,6 +52,23 @@ class _PoolShutdown(Exception):
     """The server is gone or asked us to stop — exit the supervisor."""
 
 
+def clear_stale_markers(pool_dir: Path) -> None:
+    """Remove leftover generation markers from a previous pool container.
+
+    ``ready``/``evicted`` are written by an earlier supervisor run; a stale
+    ``shutdown`` marker is written by the server's graceful shutdown handler
+    into the persistent pool dir and would otherwise abort this generation's
+    model load before it starts, silently falling every later separation back
+    to the local CPU worker. A marker from an earlier generation must never be
+    mistaken for this one's state.
+    """
+    for name in ("ready", "evicted", "shutdown"):
+        try:
+            (pool_dir / name).unlink()
+        except OSError:
+            pass
+
+
 def main() -> int:
     pool_dir = Path(os.environ.get("AUDIOMASS_POOL_DIR") or "")
     if not pool_dir.is_absolute():
@@ -123,13 +140,11 @@ def main() -> int:
     _audiomass_log.addHandler(_handler)
     _audiomass_log.setLevel(logging.INFO)
 
-    # Fresh markers: leftovers from a previous container generation must not
-    # be mistaken for this one being ready, or for this one having evicted.
-    for stale in (ready_path, evicted_path):
-        try:
-            stale.unlink()
-        except OSError:
-            pass
+    # Fresh markers: leftovers from a previous container generation (ready /
+    # evicted / shutdown) must not be mistaken for this one's state — in
+    # particular a stale `shutdown` marker must not abort this generation's
+    # model load (see clear_stale_markers).
+    clear_stale_markers(pool_dir)
 
     # The one-time model load (~35-45s) blocks, so run it on a thread and poll
     # the shutdown/stale markers meanwhile — a server shutdown during warmup
